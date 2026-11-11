@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Training test</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📝</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Condensed:wght@600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+<style>
+  body{min-height:100%}
+  .top{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--surface);border-bottom:1px solid var(--line);
+    display:flex;align-items:center;gap:.6rem;padding:.5rem .9rem;min-height:54px}
+  body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--surface)}
+  .top img{height:28px;width:auto;border-radius:3px}
+  .top .t{flex:1;min-width:0;font:600 .9rem/1.2 var(--font);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .timer{font:700 1.25rem/1 var(--display);font-variant-numeric:tabular-nums;padding:.35rem .55rem;border-radius:var(--radius);background:var(--sunk)}
+  .timer.low{background:var(--fail);color:#fff}
+  main{max-width:640px;margin:0 auto;padding:1.1rem 1rem 7rem}
+  .hero{background:var(--sign);color:var(--sign-ink);border-radius:var(--radius);padding:1.1rem 1.1rem 1rem;margin-bottom:1.1rem}
+  .hero h1{font-size:1.75rem;margin:0 0 .25rem}
+  .hero p{margin:0;font-weight:500}
+  .facts{display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem;margin:1rem 0}
+  .facts div{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:.6rem;text-align:center}
+  .facts b{display:block;font:700 1.5rem/1.1 var(--display)}
+  .facts span{font-size:.8rem;color:var(--muted)}
+  .qno{font:700 1rem/1 var(--display);color:var(--muted);margin-bottom:.5rem;display:flex;justify-content:space-between}
+  .qtext{font-size:1.15rem;font-weight:600;line-height:1.45;margin-bottom:1rem;white-space:pre-wrap}
+  .opt{display:flex;gap:.8rem;align-items:flex-start;width:100%;text-align:left;font:inherit;color:var(--ink);background:var(--surface);
+    border:2px solid var(--line);border-radius:var(--radius);padding:.85rem .9rem;margin-bottom:.6rem;cursor:pointer;min-height:56px}
+  .opt .k{flex:none;width:30px;height:30px;border-radius:50%;border:2px solid var(--muted);display:grid;place-items:center;font:700 .95rem/1 var(--display)}
+  .opt.multi .k{border-radius:5px}
+  .opt[aria-checked="true"]{border-color:var(--ink);background:var(--sunk)}
+  .opt[aria-checked="true"] .k{background:var(--ink);border-color:var(--ink);color:var(--bg)}
+  .navbar{position:fixed;left:0;right:0;bottom:0;background:var(--surface);border-top:1px solid var(--line);
+    padding:.65rem .9rem calc(.65rem + env(safe-area-inset-bottom,0px));display:flex;gap:.6rem;z-index:5}
+  .navbar .btn{flex:1;justify-content:center;min-height:50px;font-size:1rem}
+  .dots{display:grid;grid-template-columns:repeat(auto-fill,minmax(42px,1fr));gap:.4rem;margin:1rem 0}
+  .dots button{font:700 .95rem/1 var(--display);height:42px;border-radius:var(--radius);border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer}
+  .dots button.done{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+  .dots button.cur{outline:3px solid var(--red);outline-offset:1px}
+  .sync{font-size:.8rem;color:var(--muted);text-align:right;margin-top:.4rem;min-height:1.2em}
+  .sync.off{color:var(--warn);font-weight:600}
+  .score{display:flex;align-items:center;gap:1.1rem;margin:1rem 0}
+  .ring{--p:0;width:118px;height:118px;border-radius:50%;flex:none;display:grid;place-items:center;
+    background:conic-gradient(var(--c) calc(var(--p)*1%),var(--sunk) 0)}
+  .ring > div{width:92px;height:92px;border-radius:50%;background:var(--bg);display:grid;place-items:center;font:700 1.8rem/1 var(--display)}
+  .verdict{font:700 1.8rem/1.05 var(--display)}
+  .rv{border:1px solid var(--line);border-radius:var(--radius);padding:.8rem;margin-bottom:.6rem;background:var(--surface)}
+  .rv .o{font-size:.92rem;padding:.25rem .45rem;border-radius:4px;margin-top:.25rem}
+  .rv .o.key{background:var(--pass-soft);color:var(--pass);font-weight:600}
+  .rv .o.bad{background:var(--fail-soft);color:var(--fail)}
+  .center{text-align:center;padding:3rem 1rem}
+</style>
+</head>
+<body>
+<div class="top">
+  <img src="/logo-mhg.png" alt="My Home Group">
+  <div class="t" id="topTitle">Training test</div>
+  <div class="timer" id="timer" hidden aria-live="off"></div>
+</div>
+<main id="app"><div class="center"><span class="spinner" aria-hidden="true"></span><p class="muted" style="margin-top:1rem">Loading…</p></div></main>
+<div class="navbar" id="navbar" hidden></div>
+
+<script src="/common.js"></script>
+<script>
+const code = (location.pathname.match(/\/t\/([A-Za-z0-9]+)/)?.[1] || new URLSearchParams(location.search).get("c") || "").toUpperCase();
+const KEY = "teas:" + code;
+const app = document.getElementById("app");
+const navbar = document.getElementById("navbar");
+const timerEl = document.getElementById("timer");
+let info = null, att = null, st = null, timeOffset = 0, saveTimer = null, tick = null;
+
+function load() { try { return JSON.parse(localStorage.getItem(KEY)) || null; } catch { return null; } }
+function persist() { try { localStorage.setItem(KEY, JSON.stringify(st)); } catch {} }
+
+async function api(path, body) {
+  const r = await fetch("/api" + path, body ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {});
+  let j = {}; try { j = await r.json(); } catch {}
+  if (!r.ok) { const e = new Error(j.error || "Network problem. Try again."); e.status = r.status; throw e; }
+  return j;
+}
+
+function showError(msg, retry) {
+  navbar.hidden = true; timerEl.hidden = true;
+  app.innerHTML = `<div class="center"><h2>Can't open the test</h2><p class="muted">${esc(msg)}</p>${retry ? `<button class="btn primary" id="retry">Try again</button>` : ""}</div>`;
+  if (retry) document.getElementById("retry").onclick = retry;
+}
+
+async function boot() {
+  if (!code) return showError("This link has no session code. Scan the QR code again.");
+  try { info = await api("/join/" + code); }
+  catch (e) { return showError(e.message, e.status ? null : boot); }
+  document.getElementById("topTitle").textContent = info.title;
+  document.title = info.title;
+  st = load();
+  if (st?.result) return showResult(st.result);
+  if (st?.attemptId && st.token) return start({ empId: st.empId, token: st.token });
+  showJoin();
+}
+
+function showJoin(errMsg) {
+  navbar.hidden = true;
+  const closed = info.status !== "open";
+  app.innerHTML = `
+  <section class="hero"><h1>${esc(info.title)}</h1><p>${esc(STYPE[info.stype])}${info.trainer ? " · " + esc(info.trainer) : ""}</p></section>
+  <div class="facts"><div><b>${info.questionCount}</b><span>questions</span></div>
+    <div><b>${info.timeLimitMin || "—"}</b><span>${info.timeLimitMin ? "minutes" : "no time limit"}</span></div>
+    <div><b>${info.passMark}%</b><span>to pass</span></div></div>
+  ${info.negativeMark ? `<div class="notice">Wrong answers lose ${info.negativeMark} mark. Leave a question blank if you don't know.</div>` : ""}
+  ${closed ? `<div class="notice ${info.status === "closed" ? "err" : ""}">${info.status === "closed" ? "This test is closed. Already submitted? Enter your Employee ID to see your result." : "The trainer hasn't opened this test yet. Fill in your details and wait for the start."}</div>` : ""}
+  ${errMsg ? `<div class="notice err" role="alert">${esc(errMsg)}</div>` : ""}
+  <form id="joinForm" class="panel" novalidate>
+    <label class="f"><span>Employee ID</span><input type="text" id="empId" autocomplete="off" autocapitalize="characters" required value="${esc(st?.empId || "")}"></label>
+    <label class="f"><span>Full name</span><input type="text" id="name" autocomplete="name" required></label>
+    <label class="f"><span>Department</span><input type="text" id="dept" autocomplete="organization-title"></label>
+    <button class="btn primary block" type="submit" id="go">${info.status === "closed" ? "Show my result" : "Start test"}</button>
+  </form>`;
+  const empEl = document.getElementById("empId");
+  empEl.addEventListener("change", async () => {
+    if (!info.hasRoster || !empEl.value.trim()) return;
+    try {
+      const r = await api(`/join/${code}/emp/${encodeURIComponent(empEl.value.trim())}`);
+      if (r.found) { document.getElementById("name").value = r.name || ""; document.getElementById("dept").value = r.dept || ""; }
+    } catch {}
+  });
+  document.getElementById("joinForm").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const empId = empEl.value.trim(), name = document.getElementById("name").value.trim();
+    if (!empId) return empEl.focus();
+    if (!name && !info.hasRoster) return document.getElementById("name").focus();
+    const btn = document.getElementById("go"); btn.disabled = true; btn.innerHTML = `<span class="spinner"></span> Starting…`;
+    start({ empId, name, dept: document.getElementById("dept").value.trim(), token: st?.empId?.toUpperCase() === empId.toUpperCase() ? st.token : undefined });
+  };
+}
+
+async function start(body) {
+  let r;
+  try { r = await api(`/join/${code}/start`, body); }
+  catch (e) {
+    if (e.status === 404 && st) { localStorage.removeItem(KEY); st = null; }
+    return showJoin(e.message);
+  }
+  if (r.submitted) { st = { empId: r.result.empId, result: r.result }; persist(); return showResult(r.result); }
+  att = r;
+  timeOffset = new Date(r.serverNow).getTime() - Date.now();
+  const prev = st && st.attemptId === r.attemptId ? st : null;
+  st = { attemptId: r.attemptId, token: r.token, empId: r.empId, idx: prev?.idx || 0,
+         answers: prev?.answers || r.answers || {}, tabSwitches: prev?.tabSwitches || 0, pendingSubmit: prev?.pendingSubmit || false, dirty: prev?.dirty || false };
+  persist();
+  if (st.pendingSubmit) return submit(true);
+  if (r.deadline) startTimer();
+  renderQ();
+  if (st.dirty) queueSave(0);
+}
+
+/* ---------- timer ---------- */
+function startTimer() {
+  timerEl.hidden = false;
+  clearInterval(tick);
+  const end = new Date(att.deadline).getTime();
+  const step = () => {
+    const left = Math.max(0, end - (Date.now() + timeOffset));
+    const m = Math.floor(left / 60000), s = Math.floor((left % 60000) / 1000);
+    timerEl.textContent = `${m}:${String(s).padStart(2, "0")}`;
+    timerEl.classList.toggle("low", left < 60000);
+    if (left <= 0) { clearInterval(tick); toast("Time is up — submitting your answers"); submit(true); }
+  };
+  step(); tick = setInterval(step, 1000);
+}
+
+/* ---------- questions ---------- */
+const answered = (q) => (st.answers[q.i] || []).length > 0;
+
+function renderQ() {
+  const qs = att.questions, n = qs.length;
+  if (st.idx >= n) return renderReview();
+  const q = qs[st.idx], sel = st.answers[q.i] || [];
+  const multi = q.qtype === "multi";
+  app.innerHTML = `
+    <div class="qno"><span>Question ${st.idx + 1} of ${n}</span><span>${qs.filter(answered).length} answered</span></div>
+    <div class="bar" style="margin-bottom:1rem"><i style="width:${((st.idx + 1) / n) * 100}%"></i></div>
+    <div class="qtext" id="qt">${esc(q.text)}</div>
+    ${multi ? `<p class="small muted" style="margin-top:-.5rem">Select all correct answers.</p>` : ""}
+    <div role="${multi ? "group" : "radiogroup"}" aria-labelledby="qt">
+    ${q.options.map((o, k) => `<button type="button" class="opt ${multi ? "multi" : ""}" role="${multi ? "checkbox" : "radio"}" aria-checked="${sel.includes(o.id)}" data-id="${o.id}">
+      <span class="k">${LETTERS[k]}</span><span>${esc(o.text)}</span></button>`).join("")}
+    </div>
+    <div class="sync" id="sync"></div>`;
+  app.querySelectorAll(".opt").forEach((b) => b.onclick = () => {
+    const id = Number(b.dataset.id);
+    let cur = st.answers[q.i] || [];
+    cur = multi ? (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]) : (cur[0] === id ? [] : [id]);
+    if (cur.length) st.answers[q.i] = cur; else delete st.answers[q.i];
+    app.querySelectorAll(".opt").forEach((x) => x.setAttribute("aria-checked", cur.includes(Number(x.dataset.id))));
+    app.querySelector(".qno span:last-child").textContent = `${qs.filter(answered).length} answered`;
+    st.dirty = true; persist(); queueSave();
+  });
+  navbar.hidden = false;
+  navbar.innerHTML = `<button class="btn" id="prev" ${st.idx === 0 ? "disabled" : ""}>Back</button>
+    <button class="btn" id="all">All</button>
+    <button class="btn primary" id="next">${st.idx === n - 1 ? "Review" : "Next"}</button>`;
+  navbar.querySelector("#prev").onclick = () => go(st.idx - 1);
+  navbar.querySelector("#next").onclick = () => go(st.idx + 1);
+  navbar.querySelector("#all").onclick = () => go(n);
+  updateSync();
+  window.scrollTo(0, 0);
+}
+function go(i) { st.idx = Math.max(0, Math.min(i, att.questions.length)); persist(); renderQ(); }
+
+function renderReview() {
+  const qs = att.questions, left = qs.filter((q) => !answered(q)).length;
+  app.innerHTML = `<h2>Check before you submit</h2>
+    <p class="muted">${left ? `${left} question${left > 1 ? "s" : ""} not answered. Tap a number to go back.` : "All questions answered."}</p>
+    <div class="dots">${qs.map((q, k) => `<button class="${answered(q) ? "done" : ""}" data-k="${k}" aria-label="Question ${k + 1}${answered(q) ? ", answered" : ""}">${k + 1}</button>`).join("")}</div>
+    <div class="sync" id="sync"></div>`;
+  app.querySelectorAll(".dots button").forEach((b) => b.onclick = () => go(Number(b.dataset.k)));
+  navbar.hidden = false;
+  navbar.innerHTML = `<button class="btn" id="back">Back</button><button class="btn primary" id="sub">Submit answers</button>`;
+  navbar.querySelector("#back").onclick = () => go(qs.length - 1);
+  navbar.querySelector("#sub").onclick = () => {
+    if (left && !confirm(`${left} question${left > 1 ? "s are" : " is"} not answered. Submit anyway?`)) return;
+    submit(false);
+  };
+  updateSync();
+}
+
+/* ---------- autosave / offline ---------- */
+let syncState = "idle";
+function updateSync() {
+  const el = document.getElementById("sync"); if (!el) return;
+  el.className = "sync" + (syncState === "offline" ? " off" : "");
+  el.textContent = syncState === "saved" ? "Answers saved" : syncState === "saving" ? "Saving…" : syncState === "offline" ? "No network — answers are kept on this phone and will be sent automatically" : "";
+}
+function queueSave(delay = 1200) { clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, delay); }
+async function saveNow() {
+  if (!st?.attemptId || st.result) return;
+  syncState = "saving"; updateSync();
+  try {
+    const r = await api(`/attempt/${st.attemptId}/save`, { token: st.token, answers: st.answers, tabSwitches: st.tabSwitches });
+    if (r.submitted) { st.result = r.result; persist(); return showResult(r.result); }
+    st.dirty = false; persist(); syncState = "saved";
+  } catch (e) { syncState = e.status ? "idle" : "offline"; if (!e.status) queueSave(8000); }
+  updateSync();
+}
+window.addEventListener("online", () => { if (st?.pendingSubmit) submit(true); else if (st?.dirty) queueSave(0); });
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" && att && st && !st.result) { st.tabSwitches = (st.tabSwitches || 0) + 1; persist(); }
+});
+
+async function submit(auto) {
+  clearTimeout(saveTimer);
+  st.pendingSubmit = true; persist();
+  navbar.hidden = true;
+  app.innerHTML = `<div class="center"><span class="spinner"></span><p style="margin-top:1rem">Submitting your answers…</p></div>`;
+  try {
+    const r = await api(`/attempt/${st.attemptId}/submit`, { token: st.token, answers: st.answers, tabSwitches: st.tabSwitches });
+    clearInterval(tick); timerEl.hidden = true;
+    st = { empId: st.empId, result: r.result }; persist();
+    showResult(r.result, r.late);
+  } catch (e) {
+    if (e.status) { st.pendingSubmit = false; persist(); toast(e.message); return renderQ(); }
+    app.innerHTML = `<div class="center"><h2>Waiting for network</h2><p class="muted">Your answers are safe on this phone. They will be submitted as soon as the network is back. Keep this page open.</p><button class="btn primary" id="again">Try now</button></div>`;
+    document.getElementById("again").onclick = () => submit(auto);
+    setTimeout(() => { if (st.pendingSubmit) submit(auto); }, 10000);
+  }
+}
+
+/* ---------- result ---------- */
+function showResult(r, late) {
+  navbar.hidden = true; timerEl.hidden = true; clearInterval(tick);
+  const c = r.passed ? "var(--pass)" : "var(--fail)";
+  app.innerHTML = `
+    <h2>Your result</h2>
+    <p class="muted" style="margin-top:-.3rem">${esc(r.name)} · ${esc(r.empId)}</p>
+    ${late ? `<div class="notice">Time ran out before this phone could submit, so the last saved answers were scored.</div>` : ""}
+    <div class="score"><div class="ring" style="--p:${r.percent};--c:${c}"><div>${r.percent}%</div></div>
+      <div><div class="verdict" style="color:${c}">${r.passed ? "Passed" : "Not passed"}</div>
+      <div class="muted">Score ${r.score} of ${r.max} · pass mark ${r.passMark}%</div>
+      <div class="small muted">${r.correct} correct · ${r.wrong} wrong · ${r.skipped} not answered</div></div></div>
+    <div class="panel" style="margin-bottom:1rem"><h3>By topic</h3>
+    ${r.topics.map((t) => { const p = t.total ? Math.round((t.correct / t.total) * 100) : 0;
+      return `<div style="margin:.55rem 0"><div class="row" style="justify-content:space-between"><span>${esc(t.topic)}</span><span class="num">${t.correct}/${t.total}</span></div><div class="bar ${p >= r.passMark ? "good" : "bad"}"><i style="width:${p}%"></i></div></div>`; }).join("")}
+    </div>
+    <div class="row" style="margin-bottom:1.2rem"><button class="btn primary" id="pdf">Download result (PDF)</button></div>
+    ${r.review ? `<h3>Answers</h3>${r.review.map((q, k) => `<div class="rv"><b>${k + 1}. ${esc(q.text)}</b>
+      ${q.options.map((o, j) => { const key = q.answer.includes(j), mine = q.selected.includes(j);
+        return `<div class="o ${key ? "key" : mine ? "bad" : ""}">${LETTERS[j]}. ${esc(o)}${key ? " — correct" : ""}${mine && !key ? " — your answer" : ""}</div>`; }).join("")}
+      ${q.status === "skipped" ? `<div class="small muted" style="margin-top:.3rem">Not answered</div>` : ""}
+      ${q.explanation ? `<div class="small" style="margin-top:.4rem">${esc(q.explanation)}</div>` : ""}</div>`).join("")}`
+      : `<p class="muted">The trainer will discuss the answers in class.</p>`}`;
+  document.getElementById("pdf").onclick = () => openPrint(`Result ${r.empId}`, resultCardHTML(r));
+  window.scrollTo(0, 0);
+}
+
+boot();
+</script>
+</body>
+</html>

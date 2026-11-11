@@ -1,0 +1,9 @@
+[build]
+  publish = "public"
+  command = ""
+
+# QR links look like https://<site>/t/ABC123 and open the participant page
+[[redirects]]
+  from = "/t/*"
+  to = "/take.html"
+  status = 200

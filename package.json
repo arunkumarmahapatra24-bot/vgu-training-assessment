@@ -1,0 +1,16 @@
+{
+  "name": "vgu-training-assessment",
+  "version": "1.0.0",
+  "description": "Training Effectiveness & Assessment System — QR-based tests, scoring and pre/post analysis",
+  "scripts": {
+    "dev": "netlify dev"
+  },
+  "dependencies": {
+    "@netlify/database": "^2.0.3"
+  },
+  "devDependencies": {
+    "@netlify/functions": "^6.1.1"
+  },
+  "private": true,
+  "type": "module"
+}
