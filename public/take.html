@@ -110,7 +110,9 @@ function showJoin(errMsg) {
     <div><b>${info.timeLimitMin || "—"}</b><span>${info.timeLimitMin ? "minutes" : "no time limit"}</span></div>
     <div><b>${info.passMark}%</b><span>to pass</span></div></div>
   ${info.negativeMark ? `<div class="notice">Wrong answers lose ${info.negativeMark} mark. Leave a question blank if you don't know.</div>` : ""}
-  ${closed ? `<div class="notice ${info.status === "closed" ? "err" : ""}">${info.status === "closed" ? "This test is closed. Already submitted? Enter your Employee ID to see your result." : "The trainer hasn't opened this test yet. Fill in your details and wait for the start."}</div>` : ""}
+  ${closed ? `<div class="notice ${info.status === "closed" ? "err" : ""}">${info.status === "closed" ? "This test is closed. Already submitted? Enter your Employee ID to see your result."
+    : info.openAt ? `This test opens on <b>${fmtDateTime(info.openAt)}</b>. Come back to this link then.` : "The trainer hasn't opened this test yet. Fill in your details and wait for the start."}</div>` : ""}
+  ${!closed && info.closeAt ? `<div class="notice">Open until <b>${fmtDateTime(info.closeAt)}</b>.</div>` : ""}
   ${errMsg ? `<div class="notice err" role="alert">${esc(errMsg)}</div>` : ""}
   <form id="joinForm" class="panel" novalidate>
     <label class="f"><span>Employee ID</span><input type="text" id="empId" autocomplete="off" autocapitalize="characters" required value="${esc(st?.empId || "")}"></label>
@@ -284,7 +286,7 @@ function showResult(r, late) {
     ${r.topics.map((t) => { const p = t.total ? Math.round((t.correct / t.total) * 100) : 0;
       return `<div style="margin:.55rem 0"><div class="row" style="justify-content:space-between"><span>${esc(t.topic)}</span><span class="num">${t.correct}/${t.total}</span></div><div class="bar ${p >= r.passMark ? "good" : "bad"}"><i style="width:${p}%"></i></div></div>`; }).join("")}
     </div>
-    <div class="row" style="margin-bottom:1.2rem"><button class="btn primary" id="pdf">Download result (PDF)</button></div>
+    <div class="row" style="margin-bottom:1.2rem"><button class="btn primary" id="pdf">Download result (PDF)</button>${r.certCode ? `<button class="btn" id="cert">Download certificate</button>` : ""}</div>
     ${r.review ? `<h3>Answers</h3>${r.review.map((q, k) => `<div class="rv"><b>${k + 1}. ${esc(q.text)}</b>
       ${q.options.map((o, j) => { const key = q.answer.includes(j), mine = q.selected.includes(j);
         return `<div class="o ${key ? "key" : mine ? "bad" : ""}">${LETTERS[j]}. ${esc(o)}${key ? " — correct" : ""}${mine && !key ? " — your answer" : ""}</div>`; }).join("")}
@@ -292,6 +294,7 @@ function showResult(r, late) {
       ${q.explanation ? `<div class="small" style="margin-top:.4rem">${esc(q.explanation)}</div>` : ""}</div>`).join("")}`
       : `<p class="muted">The trainer will discuss the answers in class.</p>`}`;
   document.getElementById("pdf").onclick = () => openPrint(`Result ${r.empId}`, resultCardHTML(r));
+  document.getElementById("cert")?.addEventListener("click", async () => openPrint(`Certificate ${r.empId}`, certificateHTML(r, await qrDataUrl(verifyUrl(r.certCode), 260)), "landscape"));
   window.scrollTo(0, 0);
 }
 

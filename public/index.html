@@ -91,9 +91,10 @@
   <div class="in">
     <a class="brand" href="#sessions"><img src="/logo-maha.png" alt="Maha Cement"><b>Training Assessment</b></a>
     <nav class="tabs" aria-label="Main">
-      <a href="#sessions" data-nav="sessions">Sessions</a>
-      <a href="#banks" data-nav="banks">Question banks</a>
-      <a href="#settings" data-nav="settings">Settings</a>
+      <a href="#sessions" data-nav="sessions" data-roles="admin trainer">Sessions</a>
+      <a href="#banks" data-nav="banks" data-roles="admin trainer">Question banks</a>
+      <a href="#dept" data-nav="dept" data-roles="admin trainer hod">Departments</a>
+      <a href="#settings" data-nav="settings" data-roles="admin trainer hod">Settings</a>
     </nav>
     <button class="btn sm ghost" id="signout">Sign out</button>
   </div>
@@ -111,6 +112,7 @@ const KEYSTORE = "teas:trainerKey";
 let trainerKey = null;
 try { trainerKey = localStorage.getItem(KEYSTORE) || sessionStorage.getItem(KEYSTORE); } catch {}
 let pollTimer = null;
+let me = null; // { role: admin | trainer | hod, name, depts }
 
 async function adm(method, path, body) {
   const r = await fetch("/api/admin" + path, {
@@ -129,7 +131,7 @@ const joinUrl = (code) => `${location.origin}/t/${code}`;
 
 function signOut() {
   try { localStorage.removeItem(KEYSTORE); sessionStorage.removeItem(KEYSTORE); } catch {}
-  trainerKey = null; renderLogin();
+  trainerKey = null; me = null; renderLogin();
 }
 document.getElementById("signout").onclick = signOut;
 
@@ -158,11 +160,16 @@ document.addEventListener("keydown", (e) => {
 /* ================================================================ */
 /* routing                                                          */
 /* ================================================================ */
-function route() {
+async function route() {
   clearInterval(pollTimer);
   if (!trainerKey) return renderLogin();
+  if (!me) {
+    try { me = await adm("POST", "/login"); } catch (e) { if (trainerKey) app.innerHTML = `<div class="notice err">${esc(e.message)}</div>`; return; }
+  }
   document.getElementById("hdr").hidden = false;
-  const h = location.hash.replace(/^#/, "") || "sessions";
+  document.querySelectorAll("[data-roles]").forEach((a) => (a.hidden = !a.dataset.roles.split(" ").includes(me.role)));
+  let h = location.hash.replace(/^#/, "") || (me.role === "hod" ? "dept" : "sessions");
+  if (me.role === "hod" && !/^(dept|settings)/.test(h)) { h = "dept"; history.replaceState(null, "", "#dept"); }
   const [view, id] = h.split("-");
   document.querySelectorAll("[data-nav]").forEach((a) => {
     const on = a.dataset.nav === (view === "bank" ? "banks" : view === "session" ? "sessions" : view);
@@ -173,6 +180,7 @@ function route() {
   if (view === "bank") return viewBank(Number(id));
   if (view === "session") return viewSession(Number(id));
   if (view === "settings") return viewSettings();
+  if (view === "dept") return viewDept();
   return viewSessions();
 }
 window.addEventListener("hashchange", route);
@@ -185,7 +193,7 @@ function renderLogin(err) {
     <p class="muted">Build tests from your training documents, share them by QR code, and see who learned what.</p>
     <form class="panel" id="lf">
       ${err ? `<div class="notice err" role="alert">${esc(err)}</div>` : ""}
-      <label class="f"><span>Trainer key</span><input type="password" id="k" autocomplete="current-password" required></label>
+      <label class="f"><span>Your key</span><input type="password" id="k" autocomplete="current-password" required><small>Trainers and HODs get a personal key from the administrator.</small></label>
       <label class="check"><input type="checkbox" id="rem" checked> Keep me signed in on this device</label>
       <button class="btn primary block" style="margin-top:.8rem">Sign in</button>
     </form></div>`;
@@ -194,7 +202,7 @@ function renderLogin(err) {
     e.preventDefault();
     trainerKey = document.getElementById("k").value.trim();
     try {
-      await adm("POST", "/login");
+      me = await adm("POST", "/login");
       try { (document.getElementById("rem").checked ? localStorage : sessionStorage).setItem(KEYSTORE, trainerKey); } catch {}
       route();
     } catch (er) { trainerKey = null; renderLogin(er.message); }
@@ -625,11 +633,29 @@ async function viewSessions() {
   list.innerHTML = `<div class="panel scroll-x" style="padding:0"><table class="t"><thead><tr><th>Session</th><th>Code</th><th class="hide-sm">Type</th><th class="hide-sm">Date</th><th>Status</th><th class="r">Submitted</th><th class="r">Average</th></tr></thead><tbody>
   ${rows.map((s) => `<tr class="rowlink" data-id="${s.id}"><td><a href="#session-${s.id}"><b>${esc(s.title)}</b></a>${s.trainer ? `<div class="small muted">${esc(s.trainer)}</div>` : ""}</td>
     <td class="num" style="letter-spacing:.06em">${s.code}</td><td class="hide-sm">${STYPE[s.stype]}</td><td class="hide-sm">${fmtDate(s.training_date || s.created_at)}</td>
-    <td>${statusChip(s.status)}</td><td class="r num">${s.submitted}${s.roster_count ? ` / ${s.roster_count}` : s.joined > s.submitted ? ` / ${s.joined}` : ""}</td>
+    <td>${statusChip(s)}</td><td class="r num">${s.submitted}${s.roster_count ? ` / ${s.roster_count}` : s.joined > s.submitted ? ` / ${s.joined}` : ""}</td>
     <td class="r num">${s.avg_percent !== null ? Number(s.avg_percent) + "%" : "—"}</td></tr>`).join("")}</tbody></table></div>`;
   list.querySelectorAll("tr[data-id]").forEach((tr) => (tr.onclick = (e) => { if (e.target.tagName !== "A") location.hash = "session-" + tr.dataset.id; }));
 }
-const statusChip = (s) => (s === "open" ? `<span class="chip live">Open</span>` : s === "closed" ? `<span class="chip">Closed</span>` : `<span class="chip warn">Not opened</span>`);
+const statusChip = (s) => s.status === "open" ? `<span class="chip live">Open${s.close_at ? " · closes " + fmtDateTime(s.close_at) : ""}</span>`
+  : s.status === "closed" ? `<span class="chip">Closed</span>`
+  : s.open_at ? `<span class="chip warn">Opens ${fmtDateTime(s.open_at)}</span>` : `<span class="chip warn">Not opened</span>`;
+/* datetime-local helpers (browser local time) */
+const toLocalInput = (iso) => { if (!iso) return ""; const d = new Date(iso); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
+const fromLocalInput = (v) => (v ? new Date(v).toISOString() : null);
+const CERT_MONTHS = [[0, "No expiry"], [6, "6 months"], [12, "1 year"], [24, "2 years"], [36, "3 years"]];
+function scheduleFields(p = {}) {
+  return `<details class="panel" style="margin:.8rem 0" ${p.open ? "open" : ""}><summary style="cursor:pointer;font-weight:600">Schedule and certificates</summary>
+    <div class="grid2" style="margin-top:.8rem">
+      <label class="f"><span>Opens automatically at</span><input type="datetime-local" id="oa" value="${toLocalInput(p.openAt)}"><small>Leave empty to open it yourself.</small></label>
+      <label class="f"><span>Closes automatically at</span><input type="datetime-local" id="ca" value="${toLocalInput(p.closeAt)}"><small>Unfinished attempts are scored at this time.</small></label>
+    </div>
+    <label class="check"><input type="checkbox" id="ic" ${p.issueCertificates === false ? "" : "checked"}> Give a certificate to everyone who passes</label>
+    <label class="f" style="margin-top:.6rem;max-width:320px"><span>Certificate valid for</span><select id="cv">${CERT_MONTHS.map(([v, l]) => `<option value="${v}" ${Number(p.certValidMonths || 0) === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+      <small>Expired certificates show up in the Departments view as due for refresher.</small></label></details>`;
+}
+const readSchedule = (w) => ({ openAt: fromLocalInput(w.querySelector("#oa").value), closeAt: fromLocalInput(w.querySelector("#ca").value),
+  issueCertificates: w.querySelector("#ic").checked, certValidMonths: +w.querySelector("#cv").value });
 
 function parseRoster(text) {
   return text.split(/\r?\n/).map((l) => l.split(/\t|,|;/).map((c) => c.trim())).filter((c) => c[0] && !/^emp/i.test(c[0]))
@@ -641,7 +667,8 @@ async function sessionForm(prefill = {}) {
   let banks = [], sessions = [];
   try { [banks, sessions] = await Promise.all([adm("GET", "/banks"), adm("GET", "/sessions")]); } catch (e) { return toast(e.message); }
   const usable = banks.filter((b) => b.approved > 0);
-  if (!usable.length && !prefill.questionIds) return toast("Approve some questions in a question bank first");
+  const copying = Boolean(prefill.copyFromSessionId);
+  if (!usable.length && !copying) return toast("Approve some questions in a question bank first");
   const sel = new Set(prefill.questionIds || []);
   const cache = {};
   const w = openModal(`<header><h2>${prefill.title ? "New post-training test" : "New session"}</h2><button class="btn ghost" data-close aria-label="Close">✕</button></header>
@@ -663,9 +690,10 @@ async function sessionForm(prefill = {}) {
     </div>
     <label class="check"><input type="checkbox" id="sh" checked> Shuffle question and option order for each person</label>
     <label class="check"><input type="checkbox" id="sa" checked> Show correct answers to participants after they submit</label>
-
+    ${scheduleFields(prefill)}
     <h3 style="margin-top:1.2rem">Questions <span class="muted small" id="selcount"></span></h3>
-    ${usable.length ? `<div class="toolbar"><select id="bk" style="max-width:340px">${usable.map((b) => `<option value="${b.id}">${esc(b.name)} (${b.approved})</option>`).join("")}</select>
+    ${copying ? `<p class="notice ok" style="margin-top:0">Same ${prefill.questionCount} questions as "${esc(prefill.copyTitle)}", so the results can be compared.</p>`
+    : usable.length ? `<div class="toolbar"><select id="bk" style="max-width:340px">${usable.map((b) => `<option value="${b.id}">${esc(b.name)} (${b.approved})</option>`).join("")}</select>
       <button type="button" class="btn sm" id="all">Select all in bank</button>
       <span class="row" style="gap:.35rem"><input type="number" id="rn" min="1" value="10" style="width:76px" aria-label="How many random questions"><button type="button" class="btn sm" id="rnd">Pick at random</button></span>
       <button type="button" class="btn sm ghost" id="clr">Clear</button></div>
@@ -683,6 +711,7 @@ async function sessionForm(prefill = {}) {
   w.querySelector("#ty").onchange = syncPre; syncPre();
   const count = () => (w.querySelector("#selcount").textContent = `— ${sel.size} selected`);
   const drawBank = async () => {
+    if (copying) return (w.querySelector("#selcount").textContent = "");
     if (!usable.length) return count();
     const id = +w.querySelector("#bk").value;
     const pk = w.querySelector("#pk"); pk.innerHTML = `<span class="spinner"></span>`;
@@ -691,7 +720,7 @@ async function sessionForm(prefill = {}) {
     pk.querySelectorAll("[data-q]").forEach((c) => (c.onchange = () => { c.checked ? sel.add(+c.dataset.q) : sel.delete(+c.dataset.q); count(); }));
     count();
   };
-  if (usable.length) {
+  if (usable.length && !copying) {
     w.querySelector("#bk").onchange = drawBank;
     w.querySelector("#all").onclick = () => { cache[+w.querySelector("#bk").value]?.forEach((q) => sel.add(q.id)); drawBank(); };
     w.querySelector("#clr").onclick = () => { sel.clear(); drawBank(); };
@@ -705,11 +734,12 @@ async function sessionForm(prefill = {}) {
   drawBank();
   w.querySelector("#sf").onsubmit = async (e) => {
     e.preventDefault();
-    if (!sel.size) return toast("Pick at least one question");
+    if (!sel.size && !copying) return toast("Pick at least one question");
     const body = { title: w.querySelector("#t").value, trainer: w.querySelector("#tr").value, venue: w.querySelector("#v").value, trainingDate: w.querySelector("#d").value || null,
       stype: w.querySelector("#ty").value, preSessionId: w.querySelector("#ty").value === "post" ? w.querySelector("#pre").value || null : null,
       timeLimitMin: +w.querySelector("#tl").value || 0, passMark: +w.querySelector("#pm").value, negativeMark: +w.querySelector("#nm").value,
-      shuffle: w.querySelector("#sh").checked, showAnswers: w.querySelector("#sa").checked, questionIds: [...sel], roster: parseRoster(w.querySelector("#ro").value) };
+      shuffle: w.querySelector("#sh").checked, showAnswers: w.querySelector("#sa").checked, questionIds: [...sel], roster: parseRoster(w.querySelector("#ro").value),
+      copyFromSessionId: prefill.copyFromSessionId || null, ...readSchedule(w) };
     try { const s = await adm("POST", "/sessions", body); closeModal(); location.hash = "session-" + s.id; toast(`Session created — code ${s.code}`); }
     catch (er) { toast(er.message); }
   };
@@ -732,8 +762,21 @@ function resultOf(s, a) {
   return { title: s.title, trainer: s.trainer, trainingDate: s.training_date, stype: s.stype, empId: a.emp_id, name: a.name, dept: a.dept, mode: a.mode, submittedAt: a.submitted_at,
     score: N(a.score), max: N(a.max_score), percent: N(a.percent), passed: a.passed, passMark: s.pass_mark,
     correct: statuses.filter((x) => x === "correct").length, wrong: statuses.filter((x) => x === "wrong").length, skipped: statuses.filter((x) => x === "skipped").length,
-    topics: Object.values(topics),
+    topics: Object.values(topics), venue: s.venue, ...certOf(s, a),
     review: s.questions.map((q, i) => ({ text: q.text, options: q.options, answer: q.answer, selected: a.answers?.[i] || [], status: statuses[i], explanation: q.explanation })) };
+}
+function certOf(s, a) {
+  if (!a.cert_code || !a.passed) return { certCode: null, validUntil: null, expired: false };
+  let validUntil = null;
+  if (s.cert_valid_months > 0 && a.submitted_at) { const d = new Date(a.submitted_at); d.setMonth(d.getMonth() + s.cert_valid_months); validUntil = d.toISOString(); }
+  return { certCode: a.cert_code, validUntil, expired: Boolean(validUntil && new Date(validUntil) < new Date()) };
+}
+async function printCertificates(results) {
+  const list = results.filter((r) => r.certCode);
+  if (!list.length) return toast("No certificates — no one passed, or certificates are switched off for this session");
+  const pages = [];
+  for (const r of list) pages.push(certificateHTML(r, await qrDataUrl(verifyUrl(r.certCode), 260)));
+  openPrint(list.length > 1 ? "Certificates" : `Certificate ${list[0].empId}`, pages.join(""), "landscape");
 }
 
 /* ================================================================ */
@@ -753,11 +796,11 @@ async function viewSession(id) {
     <p class="muted" style="margin:0">${STYPE[s.stype]} · ${s.questions.length} questions · ${s.time_limit_min ? s.time_limit_min + " min" : "no time limit"} · pass ${s.pass_mark}%${s.trainer ? " · " + esc(s.trainer) : ""}${s.training_date ? " · " + fmtDate(s.training_date) : ""}</p></div>
     <div class="row" id="acts"></div></div>
   <div class="joinline"><span id="stchip"></span><span class="code">${s.code}</span><span class="url">${esc(url)}</span>
-    <button class="btn sm" id="copy">Copy link</button><button class="btn sm primary" id="showBoard">Show QR to class</button></div>
+    <button class="btn sm" id="copy">Copy link</button><button class="btn sm" id="invite">Share invitation</button><button class="btn sm primary" id="showBoard">Show QR to class</button></div>
   <div class="toolbar" style="margin-top:.8rem">
     <button class="btn sm" id="pPoster">Print QR poster</button><button class="btn sm" id="pSheet">Print answer sheets</button>
     <button class="btn sm" id="pPaper">Print question paper</button><button class="btn sm" id="pKey">Print answer key</button>
-    <span class="grow"></span><button class="btn sm" id="xl">Export Excel</button><button class="btn sm" id="cards">Print all result cards</button>
+    <span class="grow"></span><button class="btn sm" id="xl">Export Excel</button><button class="btn sm" id="cards">Print all result cards</button><button class="btn sm" id="certs">Print all certificates</button>
   </div>
   <div id="statsbox"></div>
   <div class="subtabs" role="tablist">
@@ -767,6 +810,8 @@ async function viewSession(id) {
   <div id="tabbody"></div>`;
   document.getElementById("copy").onclick = async () => { try { await navigator.clipboard.writeText(url); toast("Link copied"); } catch { toast(url); } };
   document.getElementById("showBoard").onclick = () => openBoard(id);
+  document.getElementById("invite").onclick = () => inviteModal(lastData.session);
+  document.getElementById("certs").onclick = () => printCertificates(lastData.attempts.filter((a) => a.submitted_at).sort((a, b) => a.emp_id.localeCompare(b.emp_id)).map((a) => resultOf(lastData.session, a)));
   document.getElementById("pPoster").onclick = async () => openPrint("QR poster", qrPosterHTML(s, await qrDataUrl(url, 600), url));
   document.getElementById("pSheet").onclick = async () => {
     const n = Math.max(1, Math.min(200, +prompt("How many answer sheets?", Math.max(s.roster.length, 20)) || 0));
@@ -783,18 +828,19 @@ async function viewSession(id) {
   app.querySelectorAll("[data-tab]").forEach((b) => (b.onclick = () => { sesTab = b.dataset.tab; app.querySelectorAll("[data-tab]").forEach((x) => x.setAttribute("aria-selected", x === b)); drawTab(); }));
   drawHead(); drawTab();
   pollTimer = setInterval(async () => {
-    if (document.hidden || lastData.session.status !== "open" || document.querySelector(".modal-wrap")) return;
+    if (document.hidden || lastData.session.status === "closed" || document.querySelector(".modal-wrap")) return;
     try { lastData = await adm("GET", "/sessions/" + id); drawHead(); if (["people", "results", "items", "effect"].includes(sesTab)) drawTab(); updateBoard(); } catch {}
   }, 5000);
 }
 
 function drawHead() {
   const s = lastData.session, A = lastData.attempts;
-  document.getElementById("stchip").innerHTML = statusChip(s.status);
+  document.getElementById("stchip").innerHTML = statusChip(s);
   const acts = document.getElementById("acts");
   acts.innerHTML = s.status === "open" ? `<button class="btn primary" id="close">Close test</button>` :
-    s.status === "closed" ? `<button class="btn" id="open">Reopen test</button>` : `<button class="btn primary" id="open">Open test</button>`;
+    s.status === "closed" ? `<button class="btn" id="open">Reopen test</button>` : `<button class="btn primary" id="open">${s.open_at ? "Open now" : "Open test"}</button>`;
   if (s.stype === "pre") acts.innerHTML += `<button class="btn" id="mkpost">Create post-test</button>`;
+  if (s.stype === "post" || s.stype === "standalone") acts.innerHTML += `<button class="btn" id="mkret">Schedule follow-up test</button>`;
   acts.innerHTML += `<button class="btn danger" id="del">Delete</button>`;
   acts.querySelector("#open")?.addEventListener("click", () => setStatus("open"));
   acts.querySelector("#close")?.addEventListener("click", () => {
@@ -803,7 +849,9 @@ function drawHead() {
   });
   acts.querySelector("#mkpost")?.addEventListener("click", () => sessionForm({
     title: s.title.replace(/\s*[-—(]*\s*pre[- ]?(training|test)?\)?\s*$/i, "") + " — post-training", trainer: s.trainer, venue: s.venue, stype: "post", preSessionId: s.id,
-    timeLimitMin: s.time_limit_min, passMark: s.pass_mark, questionIds: s.questions.map((q) => q.id), roster: s.roster }));
+    timeLimitMin: s.time_limit_min, passMark: s.pass_mark, copyFromSessionId: s.id, copyTitle: s.title, questionCount: s.questions.length,
+    roster: s.roster, issueCertificates: s.issue_certificates, certValidMonths: s.cert_valid_months }));
+  acts.querySelector("#mkret")?.addEventListener("click", () => followUpForm(s, A));
   acts.querySelector("#del").onclick = async () => {
     if (!confirm(`Delete this session and all ${A.length} results? This can't be undone.`)) return;
     try { await adm("DELETE", "/sessions/" + s.id); location.hash = "sessions"; } catch (e) { toast(e.message); }
@@ -824,6 +872,76 @@ async function setStatus(status) {
     toast(status === "open" ? "Test is open — participants can start" : `Test closed${r.autoSubmitted ? ` — ${r.autoSubmitted} unfinished attempt${r.autoSubmitted > 1 ? "s" : ""} scored` : ""}`);
     viewSession(lastData.session.id);
   } catch (e) { toast(e.message); }
+}
+
+function followUpForm(s, attempts) {
+  const done = attempts.filter((a) => a.submitted_at);
+  const people = done.map((a) => ({ empId: a.emp_id, name: a.name, dept: a.dept || "" }));
+  const base = new Date(); base.setHours(9, 0, 0, 0);
+  const w = openModal(`<header><h2>Schedule follow-up test</h2><button class="btn ghost" data-close aria-label="Close">✕</button></header>
+  <p class="muted" style="margin-top:0">A follow-up test weeks after the training shows how much people still remember. It uses the same ${s.questions.length} questions and opens and closes by itself.</p>
+  <form id="ff">
+    <label class="f"><span>Title</span><input type="text" id="ft" value="${esc(s.title.replace(/\s*[—-]\s*post[- ]?training\s*$/i, "") + " — follow-up")}" required></label>
+    <div class="grid2">
+      <label class="f"><span>When</span><select id="fw"><option value="30">30 days after today</option><option value="60" selected>60 days after today</option><option value="90">90 days after today</option><option value="custom">Pick a date…</option></select></label>
+      <label class="f" id="fdw" hidden><span>Opens on</span><input type="datetime-local" id="fd"></label>
+      <label class="f"><span>Stays open for</span><select id="fl"><option value="1">1 day</option><option value="3">3 days</option><option value="7" selected>7 days</option><option value="14">14 days</option></select></label>
+    </div>
+    <p class="small" id="fsum"></p>
+    <label class="check"><input type="checkbox" id="fc"> Give certificates for the follow-up as well</label>
+    <p class="small muted">${people.length} people who took "${esc(s.title)}" are added as the participant list.</p>
+    <div class="row" style="justify-content:flex-end"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Schedule</button></div>
+  </form>`);
+  const when = () => {
+    const v = w.querySelector("#fw").value;
+    w.querySelector("#fdw").hidden = v !== "custom";
+    let open;
+    if (v === "custom") open = w.querySelector("#fd").value ? new Date(w.querySelector("#fd").value) : null;
+    else { open = new Date(base); open.setDate(open.getDate() + +v); }
+    const close = open ? new Date(open.getTime() + +w.querySelector("#fl").value * 86400000) : null;
+    w.querySelector("#fsum").innerHTML = open ? `Opens <b>${fmtDateTime(open)}</b>, closes <b>${fmtDateTime(close)}</b>.` : "Pick the opening date.";
+    return { open, close };
+  };
+  ["#fw", "#fd", "#fl"].forEach((k) => (w.querySelector(k).onchange = when)); when();
+  w.querySelector("#ff").onsubmit = async (e) => {
+    e.preventDefault();
+    const { open, close } = when();
+    if (!open) return toast("Pick the opening date");
+    try {
+      const r = await adm("POST", "/sessions", { title: w.querySelector("#ft").value, stype: "retention", sourceSessionId: s.id, copyFromSessionId: s.id,
+        trainer: s.trainer, venue: s.venue, trainingDate: open.toISOString().slice(0, 10), timeLimitMin: s.time_limit_min, passMark: s.pass_mark,
+        shuffle: s.shuffle, showAnswers: s.show_answers, negativeMark: Number(s.negative_mark), roster: people,
+        openAt: open.toISOString(), closeAt: close.toISOString(), issueCertificates: w.querySelector("#fc").checked, certValidMonths: s.cert_valid_months });
+      closeModal(); location.hash = "session-" + r.id;
+      toast("Follow-up scheduled — send the invitation now so people know the date");
+      setTimeout(() => inviteModal(r), 600);
+    } catch (er) { toast(er.message); }
+  };
+}
+
+function inviteText(s) {
+  const url = joinUrl(s.code);
+  const lines = [`*${s.title}*`, `${STYPE[s.stype]} — please take it on your phone:`, url, `Session code: ${s.code}`];
+  if (s.open_at) lines.push(`Opens: ${fmtDateTime(s.open_at)}`);
+  if (s.close_at) lines.push(`Closes: ${fmtDateTime(s.close_at)}`);
+  lines.push(`${s.questions.length} questions${s.time_limit_min ? `, ${s.time_limit_min} minutes` : ""}. Keep your Employee ID ready.`);
+  return lines.join("\n");
+}
+async function inviteModal(s) {
+  const text = inviteText(s);
+  const w = openModal(`<header><h2>Share invitation</h2><button class="btn ghost" data-close aria-label="Close">✕</button></header>
+    <p class="muted" style="margin-top:0">Send this to the participants' WhatsApp group, or print the QR poster for the notice board.</p>
+    <div class="row" style="align-items:flex-start;gap:1rem">
+      <textarea id="it" style="flex:1;min-width:240px;min-height:170px">${esc(text)}</textarea>
+      <img id="iq" alt="QR code for the test" style="width:150px;height:150px;background:#fff;padding:6px;border-radius:6px">
+    </div>
+    <div class="row" style="justify-content:flex-end;margin-top:.8rem">
+      <button class="btn" id="icopy">Copy message</button>
+      <a class="btn primary" id="iwa" target="_blank" rel="noopener">Open WhatsApp</a></div>`);
+  const sync = () => (w.querySelector("#iwa").href = "https://wa.me/?text=" + encodeURIComponent(w.querySelector("#it").value));
+  w.querySelector("#it").oninput = sync; sync();
+  w.querySelector("#icopy").onclick = async () => { try { await navigator.clipboard.writeText(w.querySelector("#it").value); toast("Message copied"); } catch { w.querySelector("#it").select(); toast("Press Ctrl+C to copy"); } };
+  try { w.querySelector("#iq").src = await qrDataUrl(joinUrl(s.code), 300); } catch {}
 }
 
 function drawTab() {
@@ -863,12 +981,13 @@ function tabResults(box) {
     return `<tr><td class="r num">${i + 1}</td><td class="num">${esc(a.emp_id)}</td><td>${esc(a.name)}${a.mode === "paper" ? ` <span class="chip">paper</span>` : ""}</td><td class="hide-sm">${esc(a.dept || "")}</td>
     <td class="r num">${N(a.score)}/${N(a.max_score)}</td><td class="r num"><b>${N(a.percent)}</b></td><td><span class="chip ${a.passed ? "pass" : "fail"}">${a.passed ? "Passed" : "Not passed"}</span></td>
     ${topics.length > 1 ? r.topics.map((t) => `<td class="r num hide-sm">${t.correct}/${t.total}</td>`).join("") : ""}
-    <td class="r"><button class="btn sm ghost" data-card="${a.id}">Result card</button></td></tr>`; }).join("")}
+    <td class="r" style="white-space:nowrap"><button class="btn sm ghost" data-card="${a.id}">Result card</button>${a.cert_code ? `<button class="btn sm ghost" data-cert="${a.id}">Certificate</button>` : ""}</td></tr>`; }).join("")}
   </tbody></table></div>`;
   box.querySelectorAll("[data-card]").forEach((b) => (b.onclick = () => {
     const a = lastData.attempts.find((x) => x.id === +b.dataset.card);
     openPrint(`Result ${a.emp_id}`, resultCardHTML(resultOf(s, a)));
   }));
+  box.querySelectorAll("[data-cert]").forEach((b) => (b.onclick = () => printCertificates([resultOf(s, lastData.attempts.find((x) => x.id === +b.dataset.cert))])));
 }
 
 function itemStats(s, done) {
@@ -902,79 +1021,157 @@ function tabItems(box) {
 }
 
 function effectData() {
-  const s = lastData.session;
-  const preMap = new Map(lastData.pre.map((p) => [p.emp_id, N(p.percent)]));
-  const done = lastData.attempts.filter((a) => a.submitted_at);
-  const rows = done.map((a) => {
-    const pre = preMap.has(a.emp_id) ? preMap.get(a.emp_id) : null, post = N(a.percent);
-    const gain = pre === null ? null : Math.round((post - pre) * 10) / 10;
-    const g = pre === null ? null : pre >= 100 ? null : Math.round(((post - pre) / (100 - pre)) * 100) / 100;
-    return { a, pre, post, gain, g };
-  }).sort((x, y) => (y.gain ?? -999) - (x.gain ?? -999));
-  const m = rows.filter((r) => r.pre !== null);
+  const c = lastData.chain || {};
+  const people = new Map();
+  const add = (x, key) => x?.attempts.forEach((a) => {
+    const p = people.get(a.emp_id) || { empId: a.emp_id, name: a.name, dept: a.dept };
+    p[key] = N(a.percent); p[key + "Passed"] = a.passed; people.set(a.emp_id, p);
+  });
+  add(c.pre, "pre"); add(c.post, "post"); add(c.retention, "ret");
+  const r1 = (v) => Math.round(v * 10) / 10, r2 = (v) => Math.round(v * 100) / 100;
+  const rows = [...people.values()].map((p) => {
+    const hasPP = p.pre != null && p.post != null, hasPR = p.post != null && p.ret != null;
+    return { ...p, gain: hasPP ? r1(p.post - p.pre) : null, g: hasPP && p.pre < 100 ? r2((p.post - p.pre) / (100 - p.pre)) : null,
+      retained: hasPR && p.post > 0 ? Math.round((p.ret / p.post) * 100) : null };
+  }).sort((x, y) => (y.post ?? -1) - (x.post ?? -1));
+  const m = rows.filter((r) => r.pre != null && r.post != null);
   const aPre = avg(m.map((r) => r.pre)), aPost = avg(m.map((r) => r.post));
-  const classG = m.length && aPre < 100 ? Math.round(((aPost - aPre) / (100 - aPre)) * 100) / 100 : null;
-  return { s, rows, matched: m, aPre, aPost, classG, improved: m.filter((r) => r.gain > 0).length };
+  const mr = rows.filter((r) => r.post != null && r.ret != null);
+  const aPostR = avg(mr.map((r) => r.post)), aRet = avg(mr.map((r) => r.ret));
+  return { c, rows, matched: m, aPre, aPost, improved: m.filter((r) => r.gain > 0).length,
+    classG: m.length && aPre < 100 ? r2((aPost - aPre) / (100 - aPre)) : null,
+    matchedR: mr, aPostR, aRet, retainedPct: mr.length && aPostR > 0 ? Math.round((aRet / aPostR) * 100) : null,
+    keptPass: mr.filter((r) => r.retPassed).length };
 }
 const gLabel = (g) => (g === null ? "—" : g >= 0.7 ? "High" : g >= 0.3 ? "Medium" : g > 0 ? "Low" : "No gain");
+const actionFor = (r) => (r.post != null && !r.postPassed) || (r.ret != null && !r.retPassed) ? `<span class="chip fail">Retrain</span>`
+  : (r.g !== null && r.g < 0.3) || (r.retained !== null && r.retained < 80) ? `<span class="chip warn">Follow up</span>` : "";
 
 function tabEffect(box) {
-  const s = lastData.session;
-  if (s.stype !== "post" || !s.pre_session_id) {
-    return (box.innerHTML = `<div class="panel"><h3>Measure what the training changed</h3>
-      <p>Give the same questions before and after the training. The app then shows each person's improvement and the batch's learning gain.</p>
-      <ol style="padding-left:1.2rem;margin:0 0 .8rem"><li>Create this session as a <b>pre-training test</b> and run it at the start.</li>
-      <li>After the training, open the pre-test and press <b>Create post-test</b> — same questions, linked automatically.</li>
-      <li>Results from both tests are matched by Employee ID on this tab.</li></ol>
-      ${s.stype === "pre" ? `<button class="btn primary" onclick="document.getElementById('mkpost').click()">Create post-test now</button>` : ""}</div>`);
+  const s = lastData.session, e = effectData(), c = e.c;
+  const hasPre = Boolean(c.pre && c.post), hasRet = Boolean(c.post && c.retention);
+  if (!hasPre && !hasRet) {
+    return (box.innerHTML = `<div class="panel"><h3>Measure what the training changed — and what people remember</h3>
+      <ol style="padding-left:1.2rem;margin:0 0 .8rem">
+      <li><b>Before training:</b> run a <b>pre-training test</b>.</li>
+      <li><b>After training:</b> open the pre-test and press <b>Create post-test</b> — same questions, linked automatically. This shows the learning gain.</li>
+      <li><b>30–60 days later:</b> on the post-test press <b>Schedule follow-up test</b>. It opens by itself on the date you choose and shows how much people kept.</li></ol>
+      ${s.stype === "pre" ? `<button class="btn primary" onclick="document.getElementById('mkpost').click()">Create post-test now</button>` : ""}
+      ${s.stype === "post" || s.stype === "standalone" ? `<button class="btn primary" onclick="document.getElementById('mkret').click()">Schedule follow-up test</button>` : ""}</div>`);
   }
-  const e = effectData();
-  if (!e.rows.length) return (box.innerHTML = `<div class="panel muted">Comparison with "${esc(lastData.preTitle || "pre-test")}" appears once people submit this test.</div>`);
-  box.innerHTML = `<div class="stats">
-    <div class="stat"><b>${e.matched.length}</b><span>people in both tests</span></div>
+  if (!e.rows.length) return (box.innerHTML = `<div class="panel muted">The comparison appears once people submit.</div>`);
+  const sign = (v) => (v > 0 ? "+" : "") + v;
+  box.innerHTML = `
+  <p class="muted" style="margin-top:0">${[c.pre && `Before: <b>${esc(c.pre.title)}</b>`, c.post && `After: <b>${esc(c.post.title)}</b>`, c.retention && `Follow-up: <b>${esc(c.retention.title)}</b>`].filter(Boolean).join(" · ")}</p>
+  ${hasPre ? `<div class="stats">
+    <div class="stat"><b>${e.matched.length}</b><span>people in before and after</span></div>
     <div class="stat"><b>${e.aPre ?? "—"}% → ${e.aPost ?? "—"}%</b><span>average before → after</span></div>
-    <div class="stat"><b>${e.aPre !== null ? (e.aPost - e.aPre > 0 ? "+" : "") + Math.round((e.aPost - e.aPre) * 10) / 10 : "—"}</b><span>average gain (points)</span></div>
+    <div class="stat"><b>${e.aPre !== null ? sign(Math.round((e.aPost - e.aPre) * 10) / 10) : "—"}</b><span>average gain (points)</span></div>
     <div class="stat"><b>${e.classG ?? "—"}</b><span>learning gain — ${gLabel(e.classG)}</span></div>
-    <div class="stat"><b>${e.matched.length ? pct(e.improved, e.matched.length) + "%" : "—"}</b><span>people who improved</span></div></div>
-  <p class="small muted">Learning gain = (after − before) ÷ (100 − before). It shows how much of the possible improvement was achieved, so a person who started at 80% isn't penalised. Below 0.3 is low, 0.3–0.7 medium, above 0.7 high.</p>
-  <div class="panel scroll-x" style="padding:0"><table class="t"><thead><tr><th>Emp ID</th><th>Name</th><th class="hide-sm">Department</th><th class="r">Before</th><th class="r">After</th><th class="r">Change</th><th class="r">Learning gain</th><th>Action</th></tr></thead><tbody>
-  ${e.rows.map((r) => `<tr><td class="num">${esc(r.a.emp_id)}</td><td>${esc(r.a.name)}</td><td class="hide-sm">${esc(r.a.dept || "")}</td>
-    <td class="r num">${r.pre === null ? `<span class="muted">not taken</span>` : r.pre + "%"}</td><td class="r num"><b>${r.post}%</b></td>
-    <td class="r num" style="color:${r.gain > 0 ? "var(--pass)" : r.gain < 0 ? "var(--fail)" : "inherit"}">${r.gain === null ? "—" : (r.gain > 0 ? "+" : "") + r.gain}</td>
-    <td class="r num">${r.g === null ? "—" : r.g + " " + `<span class="small muted">${gLabel(r.g)}</span>`}</td>
-    <td>${!r.a.passed ? `<span class="chip fail">Retrain</span>` : r.g !== null && r.g < 0.3 ? `<span class="chip warn">Follow up</span>` : ""}</td></tr>`).join("")}
+    <div class="stat"><b>${e.matched.length ? pct(e.improved, e.matched.length) + "%" : "—"}</b><span>people who improved</span></div></div>` : ""}
+  ${hasRet && !e.matchedR.length ? `<div class="notice">Follow-up results appear here once people take "${esc(c.retention.title)}".</div>` : ""}
+  ${hasRet && e.matchedR.length ? `<div class="stats">
+    <div class="stat"><b>${e.matchedR.length}</b><span>people in follow-up</span></div>
+    <div class="stat"><b>${e.aPostR ?? "—"}% → ${e.aRet ?? "—"}%</b><span>after training → follow-up</span></div>
+    <div class="stat"><b>${e.retainedPct ?? "—"}${e.retainedPct !== null ? "%" : ""}</b><span>knowledge retained</span></div>
+    <div class="stat"><b>${e.matchedR.length ? pct(e.keptPass, e.matchedR.length) + "%" : "—"}</b><span>still passing at follow-up</span></div></div>` : ""}
+  <p class="small muted">${hasPre ? "Learning gain = (after − before) ÷ (100 − before): the share of possible improvement achieved. Below 0.3 low, 0.3–0.7 medium, above 0.7 high. " : ""}${hasRet ? "Retained = follow-up score ÷ after-training score. Below 80% means the topic needs a refresher." : ""}</p>
+  <div class="panel scroll-x" style="padding:0"><table class="t"><thead><tr><th>Emp ID</th><th>Name</th><th class="hide-sm">Department</th>
+    ${c.pre ? `<th class="r">Before</th>` : ""}<th class="r">After</th>${hasPre ? `<th class="r">Change</th><th class="r">Learning gain</th>` : ""}
+    ${c.retention ? `<th class="r">Follow-up</th><th class="r">Retained</th>` : ""}<th>Action</th></tr></thead><tbody>
+  ${e.rows.map((r) => `<tr><td class="num">${esc(r.empId)}</td><td>${esc(r.name)}</td><td class="hide-sm">${esc(r.dept || "")}</td>
+    ${c.pre ? `<td class="r num">${r.pre == null ? `<span class="muted">—</span>` : r.pre + "%"}</td>` : ""}
+    <td class="r num"><b>${r.post == null ? `<span class="muted">—</span>` : r.post + "%"}</b></td>
+    ${hasPre ? `<td class="r num" style="color:${r.gain > 0 ? "var(--pass)" : r.gain < 0 ? "var(--fail)" : "inherit"}">${r.gain === null ? "—" : sign(r.gain)}</td>
+    <td class="r num">${r.g === null ? "—" : r.g + ` <span class="small muted">${gLabel(r.g)}</span>`}</td>` : ""}
+    ${c.retention ? `<td class="r num">${r.ret == null ? `<span class="muted">—</span>` : r.ret + "%"}</td><td class="r num">${r.retained === null ? "—" : r.retained + "%"}</td>` : ""}
+    <td>${actionFor(r)}</td></tr>`).join("")}
   </tbody></table></div>`;
 }
 
 function tabPaper(box) {
   const s = lastData.session;
   const ans = {};
+  let unclear = new Set(), queue = [], total = 0, photoUrl = null;
   box.innerHTML = `<p class="muted">For people who answered on a printed answer sheet. Questions are in the same order as the printed question paper.</p>
+  <div class="toolbar">
+    <label class="btn primary" style="cursor:pointer">Read answer sheets from photos
+      <input type="file" id="scanIn" accept="image/*" capture="environment" multiple hidden></label>
+    <span class="small muted" id="scanStat">Photograph each sheet flat and in good light. The AI reads the marks; you check and save.</span>
+  </div>
+  <div id="scanWrap" style="display:grid;gap:1rem;grid-template-columns:minmax(0,1fr)">
+  <div id="photoBox" hidden><a id="photoLink" target="_blank" rel="noopener"><img id="photo" alt="Answer sheet photo" style="width:100%;border:1px solid var(--line);border-radius:var(--radius)"></a>
+    <div class="row" style="margin-top:.5rem"><button type="button" class="btn sm" id="skip">Skip this photo</button></div></div>
   <form class="panel" id="pf">
+    <div id="scanNote"></div>
     <div class="grid2"><label class="f"><span>Employee ID</span><input type="text" id="pe" required autocomplete="off"></label>
       <label class="f"><span>Name</span><input type="text" id="pn"></label><label class="f"><span>Department</span><input type="text" id="pd"></label></div>
-    <div class="paperq" id="pq">${s.questions.map((q, i) => `<div class="pr"><span class="n">${i + 1}</span>${q.options.map((_, j) => `<button type="button" class="bub" data-q="${i}" data-o="${j}" aria-pressed="false" aria-label="Question ${i + 1} option ${LETTERS[j]}">${LETTERS[j]}</button>`).join("")}${q.qtype === "multi" ? `<span class="small muted">multi</span>` : ""}</div>`).join("")}</div>
+    <div class="paperq" id="pq">${s.questions.map((q, i) => `<div class="pr" data-row="${i}"><span class="n">${i + 1}</span>${q.options.map((_, j) => `<button type="button" class="bub" data-q="${i}" data-o="${j}" aria-pressed="false" aria-label="Question ${i + 1} option ${LETTERS[j]}">${LETTERS[j]}</button>`).join("")}${q.qtype === "multi" ? `<span class="small muted">multi</span>` : ""}</div>`).join("")}</div>
     <label class="check" style="margin-top:.8rem"><input type="checkbox" id="pov"> Replace an existing entry for this Employee ID</label>
-    <div class="row" style="justify-content:flex-end;margin-top:.6rem"><span id="pres" class="grow"></span><button type="button" class="btn" id="pclr">Clear</button><button class="btn primary">Save and score</button></div>
-  </form>`;
-  const pe = box.querySelector("#pe");
-  pe.onchange = () => { const r = s.roster.find((x) => x.empId === pe.value.trim().toUpperCase()); if (r) { box.querySelector("#pn").value = r.name; box.querySelector("#pd").value = r.dept; } };
+    <div class="row" style="justify-content:flex-end;margin-top:.6rem"><span id="pres" class="grow"></span><button type="button" class="btn" id="pclr">Clear</button><button class="btn primary" id="psave">Save and score</button></div>
+  </form></div>`;
+  const $ = (q) => box.querySelector(q);
+  const pe = $("#pe");
+  const fillRoster = () => { const r = s.roster.find((x) => x.empId === pe.value.trim().toUpperCase()); if (r) { if (!$("#pn").value) $("#pn").value = r.name; if (!$("#pd").value) $("#pd").value = r.dept; } };
+  pe.onchange = fillRoster;
+  const paint = () => {
+    box.querySelectorAll(".bub").forEach((x) => x.setAttribute("aria-pressed", (ans[x.dataset.q] || []).includes(+x.dataset.o)));
+    box.querySelectorAll(".pr").forEach((r) => (r.style.outline = unclear.has(+r.dataset.row) ? "2px solid var(--warn)" : "", r.style.borderRadius = "6px"));
+  };
   box.querySelectorAll(".bub").forEach((b) => (b.onclick = () => {
     const i = +b.dataset.q, j = +b.dataset.o, multi = s.questions[i].qtype === "multi";
     let cur = ans[i] || [];
     cur = multi ? (cur.includes(j) ? cur.filter((x) => x !== j) : [...cur, j]) : cur[0] === j ? [] : [j];
-    ans[i] = cur;
-    box.querySelectorAll(`.bub[data-q="${i}"]`).forEach((x) => x.setAttribute("aria-pressed", cur.includes(+x.dataset.o)));
+    ans[i] = cur; unclear.delete(i); paint();
   }));
-  const clear = () => { Object.keys(ans).forEach((k) => delete ans[k]); box.querySelectorAll(".bub").forEach((x) => x.setAttribute("aria-pressed", "false")); ["#pe", "#pn", "#pd"].forEach((k) => (box.querySelector(k).value = "")); box.querySelector("#pov").checked = false; pe.focus(); };
-  box.querySelector("#pclr").onclick = clear;
-  box.querySelector("#pf").onsubmit = async (e) => {
+  const clear = (keepPhoto) => {
+    Object.keys(ans).forEach((k) => delete ans[k]); unclear = new Set();
+    ["#pe", "#pn", "#pd"].forEach((k) => ($(k).value = "")); $("#pov").checked = false; $("#scanNote").innerHTML = ""; paint();
+    if (!keepPhoto) { $("#photoBox").hidden = true; $("#scanWrap").style.gridTemplateColumns = "minmax(0,1fr)"; if (photoUrl) URL.revokeObjectURL(photoUrl); photoUrl = null; }
+    pe.focus();
+  };
+  $("#pclr").onclick = () => clear(false);
+  const next = async () => {
+    if (!queue.length) { clear(false); $("#scanStat").textContent = total ? `Done — ${total} photo${total > 1 ? "s" : ""} processed.` : ""; total = 0; return; }
+    const file = queue.shift(), n = total - queue.length;
+    clear(true);
+    if (photoUrl) URL.revokeObjectURL(photoUrl);
+    photoUrl = URL.createObjectURL(file);
+    $("#photo").src = photoUrl; $("#photoLink").href = photoUrl; $("#photoBox").hidden = false;
+    $("#scanWrap").style.gridTemplateColumns = window.innerWidth > 900 ? "minmax(0,1fr) minmax(0,1.3fr)" : "minmax(0,1fr)";
+    $("#scanStat").innerHTML = `<span class="spinner"></span> Reading photo ${n} of ${total}…`;
+    $("#psave").disabled = true;
+    try {
+      const data = await imageFileToJpeg(file, 1800);
+      const r = await adm("POST", `/sessions/${s.id}/scan`, { image: { mime: "image/jpeg", data } });
+      pe.value = r.empId; $("#pn").value = r.name; $("#pd").value = r.dept;
+      Object.entries(r.answers).forEach(([k, v]) => (ans[k] = v));
+      unclear = new Set(r.unclear); paint();
+      const blank = s.questions.length - Object.keys(r.answers).length;
+      $("#scanNote").innerHTML = `<div class="notice ${unclear.size || !r.empId || r.existing ? "" : "ok"}" style="margin-top:0">
+        Photo ${n} of ${total}. Compare with the photo, fix anything wrong, then save.
+        ${unclear.size ? `<br><b>${unclear.size} row${unclear.size > 1 ? "s need" : " needs"} checking</b> (outlined).` : ""}
+        ${blank ? `<br>${blank} row${blank > 1 ? "s" : ""} left blank on the sheet.` : ""}
+        ${!r.empId ? "<br><b>Employee ID couldn't be read</b> — type it in." : !r.inRoster && s.roster.length ? "<br>This Employee ID is not on the participant list — check it." : ""}
+        ${r.existing ? `<br><b>${esc(r.empId)} already has a ${r.existing} entry.</b> Tick "Replace existing" to overwrite it.` : ""}</div>`;
+      $("#scanStat").textContent = `Photo ${n} of ${total}`;
+    } catch (er) {
+      $("#scanNote").innerHTML = `<div class="notice err" style="margin-top:0">Couldn't read photo ${n}: ${esc(er.message)} Enter it by hand or skip it.</div>`;
+      $("#scanStat").textContent = `Photo ${n} of ${total}`;
+    }
+    $("#psave").disabled = false;
+  };
+  $("#scanIn").onchange = (e) => { queue = [...e.target.files]; total = queue.length; e.target.value = ""; next(); };
+  $("#skip").onclick = () => next();
+  $("#pf").onsubmit = async (e) => {
     e.preventDefault();
     try {
-      const r = await adm("POST", `/sessions/${s.id}/paper`, { empId: pe.value, name: box.querySelector("#pn").value, dept: box.querySelector("#pd").value, answers: ans, overwrite: box.querySelector("#pov").checked });
-      box.querySelector("#pres").innerHTML = `<span class="chip ${r.result.passed ? "pass" : "fail"}">${esc(r.result.empId)}: ${r.result.percent}%</span>`;
-      toast(`Saved ${r.result.empId} — ${r.result.percent}%`); clear();
+      const r = await adm("POST", `/sessions/${s.id}/paper`, { empId: pe.value, name: $("#pn").value, dept: $("#pd").value, answers: ans, overwrite: $("#pov").checked,
+        scanFlags: $("#photoBox").hidden ? null : [...unclear] });
+      $("#pres").innerHTML = `<span class="chip ${r.result.passed ? "pass" : "fail"}">${esc(r.result.empId)}: ${r.result.percent}%</span>`;
+      toast(`Saved ${r.result.empId} — ${r.result.percent}%`);
       lastData = await adm("GET", "/sessions/" + s.id); drawHead();
+      if (!$("#photoBox").hidden) next(); else clear(false);
     } catch (er) { toast(er.message); }
   };
 }
@@ -989,6 +1186,8 @@ function tabEdit(box) {
       <label class="f"><span>Time limit (minutes)</span><input type="number" id="etl" min="0" value="${s.time_limit_min}"></label>
       <label class="f"><span>Pass mark (%)</span><input type="number" id="epm" min="0" max="100" value="${s.pass_mark}"><small>Changing it affects new submissions only.</small></label></div>
     <label class="check"><input type="checkbox" id="esa" ${s.show_answers ? "checked" : ""}> Show correct answers to participants after they submit</label>
+    ${scheduleFields({ open: Boolean(s.open_at || s.close_at), openAt: s.open_at, closeAt: s.close_at, issueCertificates: s.issue_certificates, certValidMonths: s.cert_valid_months })}
+    <p class="small muted" style="margin-top:-.4rem">Turning certificates on later doesn't create them for people who already submitted.</p>
     <label class="f" style="margin-top:.8rem"><span>Expected participants — Emp ID, Name, Department</span><textarea id="ero" style="min-height:140px">${esc(rosterText(s.roster))}</textarea></label>
     <p class="small muted">Questions can't be changed once a session exists, so results stay comparable. Create a new session for a different question set.</p>
     <button class="btn primary">Save settings</button></form>`;
@@ -997,7 +1196,7 @@ function tabEdit(box) {
     try {
       await adm("PUT", "/sessions/" + s.id, { title: box.querySelector("#et").value, trainer: box.querySelector("#etr").value, venue: box.querySelector("#ev").value,
         trainingDate: box.querySelector("#ed").value || null, timeLimitMin: +box.querySelector("#etl").value || 0, passMark: +box.querySelector("#epm").value,
-        showAnswers: box.querySelector("#esa").checked, roster: parseRoster(box.querySelector("#ero").value) });
+        showAnswers: box.querySelector("#esa").checked, roster: parseRoster(box.querySelector("#ero").value), ...readSchedule(box) });
       toast("Settings saved"); viewSession(s.id);
     } catch (er) { toast(er.message); }
   };
@@ -1008,8 +1207,8 @@ async function exportExcel(d) {
   await loadScript(LIB.xlsx);
   const s = d.session, done = d.attempts.filter((a) => a.submitted_at).sort((a, b) => N(b.percent) - N(a.percent));
   const topics = [...new Set(s.questions.map((q) => q.topic || "General"))];
-  const res = [["Rank", "Emp ID", "Name", "Department", "Mode", "Score", "Out of", "Percent", "Result", ...topics.map((t) => `${t} (correct)`), "Left page (times)", "Submitted"]];
-  done.forEach((a, i) => { const r = resultOf(s, a); res.push([i + 1, a.emp_id, a.name, a.dept || "", a.mode, N(a.score), N(a.max_score), N(a.percent), a.passed ? "Passed" : "Not passed", ...r.topics.map((t) => `${t.correct}/${t.total}`), a.tab_switches, a.submitted_at ? new Date(a.submitted_at).toLocaleString("en-IN") : ""]); });
+  const res = [["Rank", "Emp ID", "Name", "Department", "Mode", "Score", "Out of", "Percent", "Result", ...topics.map((t) => `${t} (correct)`), "Left page (times)", "Submitted", "Certificate no.", "Valid until"]];
+  done.forEach((a, i) => { const r = resultOf(s, a); res.push([i + 1, a.emp_id, a.name, a.dept || "", a.mode, N(a.score), N(a.max_score), N(a.percent), a.passed ? "Passed" : "Not passed", ...r.topics.map((t) => `${t.correct}/${t.total}`), a.tab_switches, a.submitted_at ? new Date(a.submitted_at).toLocaleString("en-IN") : "", r.certCode || "", r.validUntil ? fmtDate(r.validUntil) : ""]); });
   const notTaken = s.roster.filter((r) => !d.attempts.some((a) => a.emp_id === r.empId));
   notTaken.forEach((r) => res.push(["", r.empId, r.name, r.dept, "Not taken"]));
   const mat = [["Emp ID", "Name", ...s.questions.map((_, i) => `Q${i + 1}`)], ["KEY", "", ...s.questions.map((q) => q.answer.map((j) => LETTERS[j]).join(""))]];
@@ -1023,11 +1222,12 @@ async function exportExcel(d) {
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(res), "Results");
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(mat), "Answers");
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(items), "Question analysis");
-  if (s.stype === "post" && s.pre_session_id) {
-    const e = effectData();
-    const eff = [["Emp ID", "Name", "Department", "Before %", "After %", "Change", "Learning gain", "Level"]];
-    e.rows.forEach((r) => eff.push([r.a.emp_id, r.a.name, r.a.dept || "", r.pre ?? "not taken", r.post, r.gain ?? "", r.g ?? "", gLabel(r.g)]));
-    eff.push([], ["Batch", "", "", e.aPre ?? "", e.aPost ?? "", e.aPre !== null ? Math.round((e.aPost - e.aPre) * 10) / 10 : "", e.classG ?? "", gLabel(e.classG)]);
+  const e = effectData();
+  if ((e.c.pre && e.c.post) || (e.c.post && e.c.retention)) {
+    const eff = [["Emp ID", "Name", "Department", "Before %", "After %", "Change", "Learning gain", "Level", "Follow-up %", "Retained %", "Action"]];
+    e.rows.forEach((r) => eff.push([r.empId, r.name, r.dept || "", r.pre ?? "", r.post ?? "", r.gain ?? "", r.g ?? "", r.g === null ? "" : gLabel(r.g), r.ret ?? "", r.retained ?? "",
+      actionFor(r).replace(/<[^>]+>/g, "")]));
+    eff.push([], ["Batch", "", "", e.aPre ?? "", e.aPost ?? "", e.aPre !== null ? Math.round((e.aPost - e.aPre) * 10) / 10 : "", e.classG ?? "", gLabel(e.classG), e.aRet ?? "", e.retainedPct ?? ""]);
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(eff), "Effectiveness");
   }
   XLSX.writeFile(wb, `${s.code}_${s.title.replace(/[^\w]+/g, "_").slice(0, 40)}.xlsx`);
@@ -1065,26 +1265,198 @@ function closeBoard() { document.getElementById("board")?.remove(); if (document
 /* settings                                                         */
 /* ================================================================ */
 async function viewSettings() {
-  app.innerHTML = `<h1>Settings</h1><div class="panel" style="max-width:760px;margin-bottom:1rem" id="ai"><span class="spinner"></span></div>
-  <div class="panel" style="max-width:760px;margin-bottom:1rem"><h3>Appearance</h3>
+  const isHod = me.role === "hod";
+  app.innerHTML = `<h1>Settings</h1>
+  <div class="panel" style="max-width:860px;margin-bottom:1rem"><h3>Signed in as</h3>
+    <p style="margin:0"><b>${esc(me.name)}</b> · ${{ admin: "Administrator", trainer: "Trainer", hod: "Head of department" }[me.role]}${me.depts?.length ? " · " + me.depts.map(esc).join(", ") : ""}</p></div>
+  ${me.role === "admin" ? `<div class="panel" style="max-width:860px;margin-bottom:1rem" id="users"><span class="spinner"></span></div>` : ""}
+  ${isHod ? "" : `<div class="panel" style="max-width:860px;margin-bottom:1rem" id="ai"><span class="spinner"></span></div>`}
+  <div class="panel" style="max-width:860px;margin-bottom:1rem"><h3>Appearance</h3>
     <div class="seg" role="group" aria-label="Theme">${["auto", "light", "dark"].map((t) => `<button data-th="${t}" aria-pressed="${(localStorage.getItem("teas:theme") || "auto") === t}">${t === "auto" ? "Match device" : t === "light" ? "Light" : "Dark"}</button>`).join("")}</div></div>
-  <div class="panel" style="max-width:760px"><h3>How a session runs</h3>
+  ${isHod ? "" : `<div class="panel" style="max-width:860px"><h3>How a training cycle runs</h3>
     <ol style="padding-left:1.2rem;margin:0"><li>Add questions to a bank from your documents and approve them after checking.</li>
-    <li>Create a session, then press <b>Open test</b> and <b>Show QR to class</b>.</li>
-    <li>People scan with their phone camera — no app or login needed. Answers save as they go, even if the network drops.</li>
-    <li>People without a phone use the printed answer sheet; enter it under <b>Paper entry</b>.</li>
-    <li>Press <b>Close test</b>. Unfinished attempts are scored with their saved answers. Export to Excel or print result cards.</li></ol></div>`;
+    <li>Create a <b>pre-training test</b>, press <b>Open test</b> and <b>Show QR to class</b>. People scan with their phone — no app or login.</li>
+    <li>After the training, press <b>Create post-test</b>. Paper sheets can be photographed under <b>Paper entry</b>.</li>
+    <li>Close the test. Results, certificates and the learning gain are ready; export to Excel for IMS records.</li>
+    <li>Press <b>Schedule follow-up test</b> for 30–60 days later and share the invitation on WhatsApp.</li>
+    <li>HODs see their department's results, gaps and due refreshers under <b>Departments</b>.</li></ol></div>`}`;
   app.querySelectorAll("[data-th]").forEach((b) => (b.onclick = () => {
     try { b.dataset.th === "auto" ? localStorage.removeItem("teas:theme") : localStorage.setItem("teas:theme", b.dataset.th); } catch {}
     applyTheme(b.dataset.th); app.querySelectorAll("[data-th]").forEach((x) => x.setAttribute("aria-pressed", x === b));
   }));
+  if (me.role === "admin") drawUsers();
+  if (isHod) return;
   try {
     const a = await adm("GET", "/ai-status");
-    document.getElementById("ai").innerHTML = `<h3>AI for reading documents</h3>
+    document.getElementById("ai").innerHTML = `<h3>AI for reading documents and answer sheets</h3>
       <p>${a.ready ? `<span class="chip pass">Ready</span>` : `<span class="chip fail">Not set up</span>`} Provider: <b>${esc(a.provider)}</b> · model ${esc(a.model)}</p>
       <p class="small muted" style="margin:0">Set on the Netlify site as environment variables: <code>AI_PROVIDER</code> (gemini, anthropic or openai), the matching key (<code>GEMINI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code> or <code>OPENAI_API_KEY</code>), and optionally <code>AI_MODEL</code>. Redeploy after changing them. Excel template import works without AI.</p>`;
   } catch (e) { document.getElementById("ai").innerHTML = `<div class="notice err">${esc(e.message)}</div>`; }
 }
+
+async function drawUsers() {
+  const box = document.getElementById("users");
+  let users;
+  try { users = await adm("GET", "/users"); } catch (e) { return (box.innerHTML = `<div class="notice err">${esc(e.message)}</div>`); }
+  box.innerHTML = `<div class="row" style="justify-content:space-between;margin-bottom:.6rem"><h3 style="margin:0">Trainers and HODs</h3><button class="btn sm primary" id="adduser">Add person</button></div>
+    <p class="small muted">Each person signs in with their own key. Trainers can do everything except manage people. HODs only see the Departments view for their own departments. You sign in with the master key (TRAINER_KEY).</p>
+    ${users.length ? `<div class="scroll-x"><table class="t"><thead><tr><th>Name</th><th>Role</th><th>Departments</th><th class="hide-sm">Last sign-in</th><th></th></tr></thead><tbody>
+    ${users.map((u) => `<tr${u.active ? "" : ' style="opacity:.55"'}><td><b>${esc(u.name)}</b>${u.active ? "" : ` <span class="chip">disabled</span>`}<div class="small muted">key …${esc(u.key_hint || "")}</div></td>
+      <td>${u.role === "hod" ? "HOD" : "Trainer"}</td><td>${u.depts.map(esc).join(", ") || "—"}</td><td class="hide-sm small muted">${u.last_login_at ? fmtDateTime(u.last_login_at) : "never"}</td>
+      <td class="r" style="white-space:nowrap"><button class="btn sm ghost" data-ue="${u.id}">Edit</button><button class="btn sm ghost" data-uk="${u.id}">New key</button></td></tr>`).join("")}
+    </tbody></table></div>` : `<p class="muted" style="margin:0">No one added yet.</p>`}`;
+  box.querySelector("#adduser").onclick = () => userForm();
+  box.querySelectorAll("[data-ue]").forEach((b) => (b.onclick = () => userForm(users.find((u) => u.id === +b.dataset.ue))));
+  box.querySelectorAll("[data-uk]").forEach((b) => (b.onclick = async () => {
+    const u = users.find((x) => x.id === +b.dataset.uk);
+    if (!confirm(`Make a new key for ${u.name}? Their old key stops working immediately.`)) return;
+    try { const r = await adm("POST", `/users/${u.id}/reset`); showKey(u.name, r.key); drawUsers(); } catch (e) { toast(e.message); }
+  }));
+}
+
+function userForm(u) {
+  const w = openModal(`<header><h2>${u ? "Edit " + esc(u.name) : "Add a trainer or HOD"}</h2><button class="btn ghost" data-close aria-label="Close">✕</button></header>
+  <form id="uf">
+    <label class="f"><span>Name</span><input type="text" id="un" required value="${esc(u?.name || "")}"></label>
+    <label class="f"><span>Role</span><select id="ur"><option value="trainer">Trainer — runs tests, builds question banks</option><option value="hod">HOD — sees their department's results only</option></select></label>
+    <label class="f" id="udw"><span>Departments</span><input type="text" id="ud" value="${esc((u?.depts || []).join(", "))}" placeholder="Mechanical, Electrical">
+      <small>Separate with commas. Must match the department written on participant lists (capital letters don't matter).</small></label>
+    ${u ? `<label class="check"><input type="checkbox" id="ua" ${u.active ? "checked" : ""}> Can sign in</label>` : ""}
+    <div class="row" style="justify-content:space-between;margin-top:.8rem">${u ? `<button type="button" class="btn danger" id="udel">Remove</button>` : "<span></span>"}
+      <div class="row"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">${u ? "Save" : "Add and show key"}</button></div></div>
+  </form>`);
+  w.querySelector("#ur").value = u?.role || "trainer";
+  const sync = () => (w.querySelector("#udw").hidden = w.querySelector("#ur").value !== "hod");
+  w.querySelector("#ur").onchange = sync; sync();
+  w.querySelector("#uf").onsubmit = async (e) => {
+    e.preventDefault();
+    const body = { name: w.querySelector("#un").value, role: w.querySelector("#ur").value, depts: w.querySelector("#ur").value === "hod" ? w.querySelector("#ud").value : [] };
+    if (u) body.active = w.querySelector("#ua").checked;
+    try {
+      const r = u ? await adm("PUT", "/users/" + u.id, body) : await adm("POST", "/users", body);
+      closeModal(); drawUsers();
+      if (r.key) showKey(r.name, r.key);
+    } catch (er) { toast(er.message); }
+  };
+  if (u) w.querySelector("#udel").onclick = async () => {
+    if (!confirm(`Remove ${u.name}? Their key stops working.`)) return;
+    try { await adm("DELETE", "/users/" + u.id); closeModal(); drawUsers(); } catch (er) { toast(er.message); }
+  };
+}
+
+function showKey(name, key) {
+  const w = openModal(`<header><h2>Key for ${esc(name)}</h2><button class="btn ghost" data-close aria-label="Close">✕</button></header>
+    <p>Give this key to ${esc(name)}. They sign in at <b>${esc(location.origin)}</b> with it.</p>
+    <div class="joinline"><span class="code" style="font-size:1.5rem">${esc(key)}</span><span class="grow"></span><button class="btn sm" id="kc">Copy</button></div>
+    <div class="notice"><b>This is the only time the key is shown.</b> If it's lost, use "New key".</div>
+    <div class="row" style="justify-content:flex-end"><button class="btn primary" data-close>Done</button></div>`);
+  w.querySelector("#kc").onclick = async () => { try { await navigator.clipboard.writeText(key); toast("Key copied"); } catch { toast(key); } };
+}
+
+/* ================================================================ */
+/* departments (HOD view)                                           */
+/* ================================================================ */
+let deptState = { dept: null, data: null, tab: "action" };
+const trainingKey = (t) => String(t || "").replace(/\s*[—–-]\s*(pre|post|follow)[\w\s-]*$/i, "").trim().toLowerCase();
+
+async function viewDept() {
+  app.innerHTML = `<span class="spinner"></span>`;
+  let d;
+  try { d = await adm("GET", "/hod" + (deptState.dept ? "?dept=" + encodeURIComponent(deptState.dept) : "")); }
+  catch (e) { return (app.innerHTML = `<div class="notice err">${esc(e.message)}</div>`); }
+  if (!d.depts.length && d.available.length) { deptState.dept = d.available[0]; return viewDept(); }
+  deptState.data = d;
+  const A = d.attempts;
+  // latest attempt per person per training (pre-tests excluded: failing them is expected)
+  const latest = new Map();
+  A.filter((a) => a.stype !== "pre").forEach((a) => {
+    const k = a.empId + "|" + trainingKey(a.title);
+    if (!latest.has(k) || new Date(a.submittedAt) > new Date(latest.get(k).submittedAt)) latest.set(k, a);
+  });
+  const L = [...latest.values()];
+  const retrain = L.filter((a) => !a.passed);
+  const soon = Date.now() + 30 * 86400000;
+  const certDue = L.filter((a) => a.passed && a.validUntil && new Date(a.validUntil).getTime() < soon).sort((a, b) => new Date(a.validUntil) - new Date(b.validUntil));
+  const missing = d.sessions.filter((s) => s.status === "closed").flatMap((s) => s.notTaken.map((p) => ({ ...p, title: s.title, sessionId: s.id, date: s.trainingDate })));
+  const scored = A.filter((a) => a.stype !== "pre");
+  const people = new Map();
+  A.forEach((a) => { const p = people.get(a.empId) || { empId: a.empId, name: a.name, dept: a.dept, list: [] }; p.list.push(a); people.set(a.empId, p); });
+  const deptLabel = d.depts.join(", ") || "—";
+
+  app.innerHTML = `<div class="pagehead"><div><h1>Departments</h1><p class="muted" style="margin:0">Training results, gaps and due refreshers for <b>${esc(deptLabel)}</b>.</p></div>
+    ${d.available.length > 1 ? `<label class="row" style="gap:.5rem"><span class="small" style="font-weight:600">Department</span><select id="dsel" style="min-width:200px">
+      ${me.role === "hod" && d.available.length > 1 ? `<option value="">All my departments</option>` : ""}
+      ${d.available.map((x) => `<option ${d.depts.length === 1 && d.depts[0].toLowerCase() === x.toLowerCase() ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></label>` : ""}</div>
+  ${!d.depts.length ? `<div class="panel muted">No department names found yet. They come from the Department column of participant lists and from what participants type when they join.</div>` : `
+  <div class="stats">
+    <div class="stat"><b>${people.size}</b><span>people tested</span></div>
+    <div class="stat"><b>${scored.length}</b><span>tests taken (excl. pre-tests)</span></div>
+    <div class="stat"><b>${scored.length ? pct(scored.filter((a) => a.passed).length, scored.length) + "%" : "—"}</b><span>pass rate</span></div>
+    <div class="stat"><b>${scored.length ? avg(scored.map((a) => a.percent)) + "%" : "—"}</b><span>average score</span></div>
+    <div class="stat"><b style="color:${retrain.length ? "var(--fail)" : "inherit"}">${retrain.length}</b><span>need retraining</span></div>
+    <div class="stat"><b style="color:${certDue.length ? "var(--warn)" : "inherit"}">${certDue.length}</b><span>certificates expired or due in 30 days</span></div>
+  </div>
+  <div class="subtabs" role="tablist">${[["action", "Needs action"], ["trainings", "Trainings"], ["topics", "Topic gaps"], ["people", "People"]]
+    .map(([k, l]) => `<button role="tab" data-dt="${k}" aria-selected="${deptState.tab === k}">${l}</button>`).join("")}</div>
+  <div id="dbody"></div>`}`;
+  app.querySelector("#dsel")?.addEventListener("change", (e) => { deptState.dept = e.target.value || null; viewDept(); });
+  if (!d.depts.length) return;
+  const draw = () => {
+    const box = document.getElementById("dbody");
+    if (deptState.tab === "action") {
+      const sect = (title, hint, rows) => `<div class="panel" style="margin-bottom:1rem;padding:0"><div style="padding:.9rem 1rem .3rem"><h3 style="margin:0">${title}</h3><p class="small muted" style="margin:.2rem 0 .4rem">${hint}</p></div>${rows}</div>`;
+      box.innerHTML =
+        sect(`Need retraining <span class="muted">(${retrain.length})</span>`, "Their latest result in the training was below the pass mark.",
+          retrain.length ? `<div class="scroll-x"><table class="t"><thead><tr><th>Emp ID</th><th>Name</th><th>Training</th><th class="r">Score</th><th>Date</th><th></th></tr></thead><tbody>
+          ${retrain.map((a) => `<tr><td class="num">${esc(a.empId)}</td><td>${esc(a.name)}</td><td>${esc(a.title)}</td><td class="r num">${a.percent}%</td><td class="small">${fmtDate(a.submittedAt)}</td><td class="r"><button class="btn sm ghost" data-card="${a.id}">Result card</button></td></tr>`).join("")}</tbody></table></div>` : `<p class="muted" style="padding:0 1rem 1rem;margin:0">No one — everyone passed their latest test.</p>`) +
+        sect(`Certificates expired or due <span class="muted">(${certDue.length})</span>`, "Plan a refresher before the certificate runs out.",
+          certDue.length ? `<div class="scroll-x"><table class="t"><thead><tr><th>Emp ID</th><th>Name</th><th>Training</th><th>Valid until</th><th></th></tr></thead><tbody>
+          ${certDue.map((a) => `<tr><td class="num">${esc(a.empId)}</td><td>${esc(a.name)}</td><td>${esc(a.title)}</td><td>${a.expired ? `<span class="chip fail">Expired ${fmtDate(a.validUntil)}</span>` : `<span class="chip warn">${fmtDate(a.validUntil)}</span>`}</td><td class="r"><button class="btn sm ghost" data-cert="${a.id}">Certificate</button></td></tr>`).join("")}</tbody></table></div>` : `<p class="muted" style="padding:0 1rem 1rem;margin:0">None due in the next 30 days.</p>`) +
+        sect(`Missed a test <span class="muted">(${missing.length})</span>`, "On the participant list of a closed test, but never took it.",
+          missing.length ? `<div class="scroll-x"><table class="t"><thead><tr><th>Emp ID</th><th>Name</th><th>Test</th><th>Date</th></tr></thead><tbody>
+          ${missing.map((m) => `<tr><td class="num">${esc(m.empId)}</td><td>${esc(m.name)}</td><td>${esc(m.title)}</td><td class="small">${fmtDate(m.date)}</td></tr>`).join("")}</tbody></table></div>` : `<p class="muted" style="padding:0 1rem 1rem;margin:0">No one missed a test.</p>`);
+    } else if (deptState.tab === "trainings") {
+      box.innerHTML = `<div class="panel scroll-x" style="padding:0"><table class="t"><thead><tr><th>Test</th><th>Type</th><th>Date</th><th>Status</th><th class="r">Taken</th><th class="r">Passed</th><th class="r">Average</th></tr></thead><tbody>
+        ${d.sessions.map((s) => `<tr><td><b>${esc(s.title)}</b></td><td>${STYPE[s.stype]}</td><td class="small">${fmtDate(s.trainingDate)}</td><td>${statusChip({ status: s.status, open_at: s.openAt, close_at: s.closeAt })}</td>
+          <td class="r num">${s.taken}${s.expected ? ` / ${s.expected}` : ""}</td><td class="r num">${s.taken ? s.passed : "—"}</td><td class="r num">${s.avg !== null ? s.avg + "%" : "—"}</td></tr>`).join("")}
+      </tbody></table></div>`;
+    } else if (deptState.tab === "topics") {
+      const t = d.topics.map((x) => ({ ...x, p: pct(x.correct, x.total) })).sort((a, b) => a.p - b.p);
+      box.innerHTML = t.length ? `<p class="muted" style="margin-top:0">Share of answers correct per topic, across all tests by this department. The weakest topics are first — good candidates for the next training.</p>
+        <div class="panel">${t.map((x) => `<div style="margin:.6rem 0"><div class="row" style="justify-content:space-between"><span>${esc(x.topic)}</span><span class="num">${x.p}% <span class="small muted">(${x.correct}/${x.total})</span></span></div>
+        <div class="bar ${x.p >= 60 ? "good" : "bad"}"><i style="width:${x.p}%"></i></div></div>`).join("")}</div>` : `<div class="panel muted">No answers yet.</div>`;
+    } else {
+      const list = [...people.values()].map((p) => { p.list.sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt)); return p; }).sort((a, b) => a.name.localeCompare(b.name));
+      box.innerHTML = `<div class="panel scroll-x" style="padding:0"><table class="t"><thead><tr><th>Emp ID</th><th>Name</th><th class="hide-sm">Department</th><th class="r">Tests</th><th>Latest</th><th></th></tr></thead><tbody>
+        ${list.map((p) => { const l = p.list[0]; return `<tr class="rowlink" data-p="${esc(p.empId)}"><td class="num">${esc(p.empId)}</td><td>${esc(p.name)}</td><td class="hide-sm">${esc(p.dept || "")}</td><td class="r num">${p.list.length}</td>
+          <td>${esc(l.title)} <span class="chip ${l.passed ? "pass" : "fail"}">${l.percent}%</span></td><td class="r"><button class="btn sm ghost">History</button></td></tr>`; }).join("")}
+      </tbody></table></div>`;
+      box.querySelectorAll("[data-p]").forEach((tr) => (tr.onclick = () => personModal(people.get(tr.dataset.p))));
+    }
+    box.querySelectorAll("[data-card]").forEach((b) => (b.onclick = (e) => { e.stopPropagation(); printCard(+b.dataset.card); }));
+    box.querySelectorAll("[data-cert]").forEach((b) => (b.onclick = (e) => { e.stopPropagation(); printCert(+b.dataset.cert); }));
+  };
+  app.querySelectorAll("[data-dt]").forEach((b) => (b.onclick = () => { deptState.tab = b.dataset.dt; app.querySelectorAll("[data-dt]").forEach((x) => x.setAttribute("aria-selected", x === b)); draw(); }));
+  draw();
+}
+async function printCard(id) {
+  try { const { result } = await adm("GET", "/hod/card/" + id); openPrint(`Result ${result.empId}`, resultCardHTML(result)); } catch (e) { toast(e.message); }
+}
+async function printCert(id) {
+  try { const { result } = await adm("GET", "/hod/card/" + id); printCertificates([result]); } catch (e) { toast(e.message); }
+}
+function personModal(p) {
+  const w = openModal(`<header><h2>${esc(p.name)} <span class="muted small">${esc(p.empId)} · ${esc(p.dept || "")}</span></h2><button class="btn ghost" data-close aria-label="Close">✕</button></header>
+    <div class="scroll-x"><table class="t"><thead><tr><th>Test</th><th>Type</th><th>Date</th><th class="r">Score</th><th>Certificate</th><th></th></tr></thead><tbody>
+    ${p.list.map((a) => `<tr><td>${esc(a.title)}</td><td class="small">${STYPE[a.stype]}</td><td class="small">${fmtDate(a.submittedAt)}</td>
+      <td class="r"><span class="chip ${a.passed ? "pass" : "fail"}">${a.percent}%</span></td>
+      <td class="small">${a.certCode ? (a.expired ? `<span class="chip fail">expired</span>` : a.validUntil ? "until " + fmtDate(a.validUntil) : "no expiry") : "—"}</td>
+      <td class="r" style="white-space:nowrap"><button class="btn sm ghost" data-card="${a.id}">Result card</button>${a.certCode ? `<button class="btn sm ghost" data-cert="${a.id}">Certificate</button>` : ""}</td></tr>`).join("")}
+    </tbody></table></div>`, { wide: true });
+  w.querySelectorAll("[data-card]").forEach((b) => (b.onclick = () => printCard(+b.dataset.card)));
+  w.querySelectorAll("[data-cert]").forEach((b) => (b.onclick = () => printCert(+b.dataset.cert)));
+}
+
 
 route();
 </script>

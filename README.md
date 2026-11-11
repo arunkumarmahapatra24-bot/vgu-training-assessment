@@ -41,3 +41,12 @@ If the first deploy fails with "Access Denied" on creating the database, run `ne
 - AI reads up to ~40,000 characters per request and up to 24 scanned pages per PDF; long documents are split automatically.
 - Each upload request must be under ~6 MB (photos are compressed in the browser first).
 - Questions in a session are frozen when it's created, so results stay comparable.
+
+## Phase 2 (added)
+- **Certificates** for everyone who passes, with a QR code. Anyone can scan it to check it at `/v/<certificate number>`. Set the validity period per session (Schedule and certificates).
+- **Follow-up tests**: on a post-test press *Schedule follow-up test*. It opens and closes by itself and shows how much people remembered.
+- **Share invitation**: ready-made WhatsApp message with link and QR.
+- **Departments view** for HODs: who needs retraining, certificates due, who missed a test, weakest topics, each person's history.
+- **People and keys** (Settings, administrator only): give each trainer and HOD their own key. HODs only see their departments.
+- **Read paper answer sheets from photos** (Paper entry): AI reads the marks, you check the outlined rows and save.
+- Database changes are in `netlify/database/migrations/20261112090000_phase2.sql` and apply automatically on deploy. Existing results keep working; people who already passed get a certificate number.

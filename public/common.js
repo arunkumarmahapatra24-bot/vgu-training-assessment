@@ -3,7 +3,8 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const LETTERS = "ABCDEFGH";
 const fmtDate = (d) => (d ? new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "");
 const fmtDateTime = (d) => (d ? new Date(d).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "");
-const STYPE = { pre: "Pre-training test", post: "Post-training test", standalone: "Assessment" };
+const STYPE = { pre: "Pre-training test", post: "Post-training test", standalone: "Assessment", retention: "Follow-up test" };
+const verifyUrl = (code) => `${location.origin}/v/${code}`;
 
 function toast(msg, ms = 2600) {
   let t = document.getElementById("toast");
@@ -69,15 +70,28 @@ th{background:#eee}
 .foot{margin-top:10px;font-size:8.5pt;color:#555}
 `;
 
+/* Logos are embedded as data URLs so printed pages never wait on the network. */
+(function preloadLogos() {
+  const load = (name, key) => {
+    if (window[key]) return;
+    fetch("/" + name).then((r) => (r.ok ? r.blob() : null)).then((b) => {
+      if (!b) return;
+      const fr = new FileReader(); fr.onload = () => (window[key] = fr.result); fr.readAsDataURL(b);
+    }).catch(() => {});
+  };
+  if (location.protocol.startsWith("http")) { load("logo-mhg.png", "LOGO_MHG"); load("logo-maha.png", "LOGO_MAHA"); }
+})();
+
 function printHeader(title, sub) {
   const o = location.origin;
-  return `<div class="ph"><img src="${o}/logo-mhg.png" alt="My Home Group"><div class="mid"><b>${esc(title)}</b><span>${esc(sub || "")}</span></div><img src="${o}/logo-maha.png" alt="Maha Cement"></div>`;
+  return `<div class="ph"><img src="${window.LOGO_MHG || o + "/logo-mhg.png"}" alt="My Home Group"><div class="mid"><b>${esc(title)}</b><span>${esc(sub || "")}</span></div><img src="${window.LOGO_MAHA || o + "/logo-maha.png"}" alt="Maha Cement"></div>`;
 }
 
-function openPrint(title, body) {
+function openPrint(title, body, orientation) {
   const w = window.open("", "_blank");
   if (!w) { toast("Allow pop-ups for this site to print."); return; }
-  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title><style>${PRINT_CSS}</style></head><body>${body}</body></html>`);
+  const extra = orientation === "landscape" ? "@page{size:A4 landscape;margin:10mm}" : "";
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title><style>${PRINT_CSS}${extra}${CERT_CSS}</style></head><body>${body}</body></html>`);
   w.document.close();
   const go = () => setTimeout(() => { w.focus(); w.print(); }, 250);
   const imgs = [...w.document.images];
@@ -142,4 +156,41 @@ function qrPosterHTML(s, qr, link) {
   <div style="font-size:12pt;margin-top:14px">Session code</div>
   <div style="font-size:54pt;font-weight:bold;letter-spacing:6px">${esc(s.code)}</div>
   <p style="margin-top:20px">${s.questions.length} questions${s.time_limit_min ? ` · ${s.time_limit_min} minutes` : ""} · Keep your Employee ID ready</p></div>`;
+}
+
+/* ---------------- certificate ---------------- */
+const CERT_CSS = `
+.cert{position:relative;height:186mm;border:3px solid #18202C;padding:9mm 14mm;display:flex;flex-direction:column;break-after:page;overflow:hidden}
+.cert:last-child{break-after:auto}
+.cert::before{content:"";position:absolute;inset:3mm;border:1px solid #D71920;pointer-events:none}
+.cert .top{display:flex;justify-content:space-between;align-items:center}
+.cert .top img{height:20mm}
+.cert h1{font:700 30pt/1.1 Georgia,"Times New Roman",serif;text-align:center;margin:6mm 0 1mm;letter-spacing:.5px}
+.cert .sub{text-align:center;font-size:11pt;color:#444;letter-spacing:3px;text-transform:uppercase}
+.cert .who{text-align:center;margin:7mm 0 2mm;font-size:12pt}
+.cert .name{font:700 26pt/1.2 Georgia,"Times New Roman",serif;text-align:center;border-bottom:1px solid #999;margin:0 25mm;padding-bottom:2mm}
+.cert .meta{text-align:center;font-size:11pt;margin-top:2mm;color:#333}
+.cert .what{text-align:center;font-size:12pt;margin:6mm 18mm 0;line-height:1.5}
+.cert .what b{font-size:15pt}
+.cert .foot{margin-top:auto;display:flex;align-items:flex-end;gap:10mm}
+.cert .sig{flex:1;border-top:1px solid #333;text-align:center;font-size:9.5pt;padding-top:1.5mm}
+.cert .qr{text-align:center;font-size:8pt;color:#333;width:34mm}
+.cert .qr img{width:28mm;height:28mm;display:block;margin:0 auto 1mm}
+.cert .band{position:absolute;left:0;right:0;bottom:0;height:3mm;background:repeating-linear-gradient(-45deg,#18202C 0 3mm,#FFD400 3mm 6mm)}
+`;
+function certificateHTML(r, qr) {
+  const o = location.origin;
+  const mhg = window.LOGO_MHG || `${o}/logo-mhg.png`, maha = window.LOGO_MAHA || `${o}/logo-maha.png`;
+  const when = fmtDate(r.trainingDate || r.submittedAt);
+  return `<div class="cert"><div class="top"><img src="${mhg}" alt="My Home Group"><img src="${maha}" alt="Maha Cement"></div>
+    <h1>Certificate of Training</h1><div class="sub">${r.stype === "retention" ? "Knowledge refresher" : "Successfully completed"}</div>
+    <div class="who">This is to certify that</div>
+    <div class="name">${esc(r.name)}</div>
+    <div class="meta">Employee ID ${esc(r.empId)}${r.dept ? " · " + esc(r.dept) : ""}</div>
+    <div class="what">has completed the training and passed the assessment in<br><b>${esc(r.title)}</b><br>
+      held on ${when}${r.venue ? " at " + esc(r.venue) : ""}, scoring <b>${r.percent}%</b> (pass mark ${r.passMark}%).
+      ${r.validUntil ? `<br>Valid until <b>${fmtDate(r.validUntil)}</b>.` : ""}</div>
+    <div class="foot"><div class="sig">${esc(r.trainer || "")}<br>Trainer</div><div class="sig"><br>Head of Department</div><div class="sig"><br>Authorised Signatory</div>
+      <div class="qr"><img src="${qr}" alt="">Certificate ${esc(r.certCode)}<br>Scan to verify</div></div>
+    <div class="band"></div></div>`;
 }

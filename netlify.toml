@@ -7,3 +7,9 @@
   from = "/t/*"
   to = "/take.html"
   status = 200
+
+# Certificate check links look like https://<site>/v/CERTCODE
+[[redirects]]
+  from = "/v/*"
+  to = "/verify.html"
+  status = 200

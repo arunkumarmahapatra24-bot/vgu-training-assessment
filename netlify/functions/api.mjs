@@ -24,10 +24,62 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(ha, hb);
 }
 
-function isTrainer(req) {
-  const key = env("TRAINER_KEY");
+const sha256 = (v) => crypto.createHash("sha256").update(String(v)).digest("hex");
+
+/** Who is calling the trainer API: master key = admin, else a personal key from app_users. */
+async function whoAmI(req, sql) {
   const given = req.headers.get("x-trainer-key");
-  return Boolean(key && given && safeEqual(key, given));
+  if (!given) return null;
+  const master = env("TRAINER_KEY");
+  if (master && safeEqual(master, given)) return { role: "admin", name: "Administrator", depts: [] };
+  const [u] = await sql`SELECT * FROM app_users WHERE key_hash = ${sha256(given)} AND active = true`;
+  if (!u) return null;
+  if (!u.last_login_at || Date.now() - new Date(u.last_login_at).getTime() > 3600_000)
+    await sql`UPDATE app_users SET last_login_at = now() WHERE id = ${u.id}`;
+  return { role: u.role, name: u.name, depts: u.depts || [], id: u.id };
+}
+
+function newKey(prefix) {
+  let s = "";
+  for (const b of crypto.randomBytes(10)) s += CODE_CHARS[b % CODE_CHARS.length];
+  return `${prefix}-${s.slice(0, 5)}-${s.slice(5)}`;
+}
+
+function newCertCode() {
+  let s = "";
+  for (const b of crypto.randomBytes(10)) s += CODE_CHARS[b % CODE_CHARS.length];
+  return s;
+}
+
+const normDept = (d) => String(d ?? "").trim().toLowerCase();
+
+/** Apply scheduled open/close times. Returns the up-to-date session row. */
+async function syncStatus(sql, s) {
+  if (!s) return s;
+  const now = Date.now();
+  const openAt = s.open_at ? new Date(s.open_at).getTime() : null;
+  const closeAt = s.close_at ? new Date(s.close_at).getTime() : null;
+  if (s.status !== "closed" && closeAt && now >= closeAt && (s.status === "open" || openAt)) {
+    await closeSession(sql, s);
+    return (await sql`SELECT * FROM sessions WHERE id = ${s.id}`)[0];
+  }
+  if (s.status === "draft" && openAt && now >= openAt) {
+    const [row] = await sql`UPDATE sessions SET status = 'open', opened_at = COALESCE(opened_at, now())
+                            WHERE id = ${s.id} AND status = 'draft' RETURNING *`;
+    return row ?? (await sql`SELECT * FROM sessions WHERE id = ${s.id}`)[0];
+  }
+  return s;
+}
+
+function certInfo(session, attempt) {
+  if (!attempt.cert_code || !attempt.passed) return { certCode: null, validUntil: null, expired: false };
+  let validUntil = null;
+  if (session.cert_valid_months > 0 && attempt.submitted_at) {
+    const d = new Date(attempt.submitted_at);
+    d.setMonth(d.getMonth() + session.cert_valid_months);
+    validUntil = d.toISOString();
+  }
+  return { certCode: attempt.cert_code, validUntil, expired: Boolean(validUntil && new Date(validUntil) < new Date()) };
 }
 
 function newCode() {
@@ -153,6 +205,8 @@ function buildResult(session, attempt) {
     percent: Number(attempt.percent),
     passed: attempt.passed,
     passMark: session.pass_mark,
+    venue: session.venue,
+    ...certInfo(session, attempt),
     correct: statuses.filter((s) => s === "correct").length,
     wrong: statuses.filter((s) => s === "wrong").length,
     skipped: statuses.filter((s) => s === "skipped").length,
@@ -173,9 +227,10 @@ function buildResult(session, attempt) {
 async function finalize(sql, session, attempt, answers) {
   const r = scoreAnswers(session.questions, answers, session.negative_mark);
   const passed = r.percent >= session.pass_mark;
+  const cert = passed && session.issue_certificates !== false ? newCertCode() : null;
   const rows = await sql`
     UPDATE attempts SET answers = ${J(answers)}::jsonb, submitted_at = now(),
-      score = ${r.score}, max_score = ${r.max}, percent = ${r.percent}, passed = ${passed}
+      score = ${r.score}, max_score = ${r.max}, percent = ${r.percent}, passed = ${passed}, cert_code = ${cert}
     WHERE id = ${attempt.id} AND submitted_at IS NULL
     RETURNING *`;
   if (rows.length) return rows[0];
@@ -249,8 +304,7 @@ function parseAiJson(text) {
   const a = t.indexOf("{");
   const b = t.lastIndexOf("}");
   if (a >= 0 && b > a) t = t.slice(a, b + 1);
-  const obj = JSON.parse(t);
-  return Array.isArray(obj) ? obj : obj.questions ?? [];
+  return JSON.parse(t);
 }
 
 async function callAI({ system, user, images }) {
@@ -342,8 +396,9 @@ async function callAI({ system, user, images }) {
 async function publicRoutes(req, seg, sql) {
   // GET /api/join/:code
   if (seg[0] === "join" && seg.length === 2 && req.method === "GET") {
-    const [s] = await sql`SELECT * FROM sessions WHERE code = ${seg[1].toUpperCase()}`;
+    let [s] = await sql`SELECT * FROM sessions WHERE code = ${seg[1].toUpperCase()}`;
     if (!s) return fail("No session with this code. Check the code on the trainer's screen.", 404);
+    s = await syncStatus(sql, s);
     return json({
       code: s.code,
       title: s.title,
@@ -357,6 +412,8 @@ async function publicRoutes(req, seg, sql) {
       passMark: s.pass_mark,
       negativeMark: Number(s.negative_mark),
       hasRoster: s.roster.length > 0,
+      openAt: s.open_at,
+      closeAt: s.close_at,
     });
   }
 
@@ -372,15 +429,16 @@ async function publicRoutes(req, seg, sql) {
   // POST /api/join/:code/start
   if (seg[0] === "join" && seg[2] === "start" && req.method === "POST") {
     const body = await readBody(req);
-    const [s] = await sql`SELECT * FROM sessions WHERE code = ${seg[1].toUpperCase()}`;
+    let [s] = await sql`SELECT * FROM sessions WHERE code = ${seg[1].toUpperCase()}`;
     if (!s) return fail("Session not found", 404);
+    s = await syncStatus(sql, s);
     const empId = cleanEmp(body.empId);
     if (!empId) return fail("Enter your Employee ID.");
 
     const [existing] = await sql`SELECT * FROM attempts WHERE session_id = ${s.id} AND emp_id = ${empId}`;
     if (existing?.submitted_at) return json({ submitted: true, attemptId: existing.id, result: buildResult(s, existing) });
     if (s.status !== "open")
-      return fail(s.status === "closed" ? "This test is closed." : "This test has not started yet. Wait for the trainer to open it.", 403);
+      return fail(s.status === "closed" ? "This test is closed." : s.open_at ? `This test opens on ${new Date(s.open_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "medium", timeStyle: "short" })}.` : "This test has not started yet. Wait for the trainer to open it.", 403);
 
     let attempt = existing;
     if (attempt) {
@@ -453,6 +511,18 @@ async function publicRoutes(req, seg, sql) {
     return json({ submitted: true, late: Boolean(expired), result: buildResult(s, done) });
   }
 
+  // GET /api/verify/:code — public certificate check
+  if (seg[0] === "verify" && seg.length === 2 && req.method === "GET") {
+    const code = String(seg[1]).toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 20);
+    const [a] = code ? await sql`SELECT * FROM attempts WHERE cert_code = ${code}` : [];
+    if (!a || !a.passed) return json({ valid: false });
+    const [s] = await sql`SELECT * FROM sessions WHERE id = ${a.session_id}`;
+    const c = certInfo(s, a);
+    const emp = a.emp_id.length > 3 ? a.emp_id.slice(0, a.emp_id.length - 2) + "**" : a.emp_id;
+    return json({ valid: !c.expired, expired: c.expired, certCode: c.certCode, validUntil: c.validUntil, name: a.name, empId: emp, dept: a.dept,
+      title: s.title, stype: s.stype, trainer: s.trainer, trainingDate: s.training_date, issuedAt: a.submitted_at, percent: Number(a.percent) });
+  }
+
   // GET /api/attempt/:id/result?token=
   if (seg[0] === "attempt" && seg[2] === "result" && req.method === "GET") {
     const token = new URL(req.url).searchParams.get("token");
@@ -476,11 +546,156 @@ async function closeSession(sql, s) {
   return open.length;
 }
 
-async function trainerRoutes(req, seg, sql) {
+async function brief(sql, sid) {
+  if (!sid) return null;
+  const [x] = await sql`SELECT id, title, stype, code, pass_mark FROM sessions WHERE id = ${sid}`;
+  if (!x) return null;
+  const at = await sql`SELECT emp_id, name, dept, percent, passed FROM attempts WHERE session_id = ${sid} AND submitted_at IS NOT NULL`;
+  return { ...x, attempts: at.map((a) => ({ ...a, percent: Number(a.percent) })) };
+}
+
+/** The pre-test → post-test → retention-test chain this session belongs to. */
+async function chainOf(sql, s) {
+  let pre = null, post = null, ret = null;
+  if (s.stype === "retention") {
+    post = s.source_session_id;
+    const [p] = post ? await sql`SELECT pre_session_id FROM sessions WHERE id = ${post}` : [];
+    pre = p?.pre_session_id ?? null;
+    ret = s.id;
+  } else if (s.stype === "pre") {
+    pre = s.id;
+    const [p] = await sql`SELECT id FROM sessions WHERE pre_session_id = ${s.id} ORDER BY created_at DESC LIMIT 1`;
+    post = p?.id ?? null;
+  } else {
+    post = s.id;
+    pre = s.pre_session_id;
+  }
+  if (s.stype !== "retention" && post) {
+    const [r] = await sql`SELECT id FROM sessions WHERE source_session_id = ${post} ORDER BY created_at DESC LIMIT 1`;
+    ret = r?.id ?? null;
+  }
+  return { pre: await brief(sql, pre), post: await brief(sql, post), retention: await brief(sql, ret) };
+}
+
+async function syncDue(sql) {
+  const due = await sql`SELECT * FROM sessions
+    WHERE (status = 'draft' AND open_at IS NOT NULL AND open_at <= now())
+       OR (status <> 'closed' AND close_at IS NOT NULL AND close_at <= now())`;
+  for (const x of due) await syncStatus(sql, x);
+}
+
+const LETTERS = "ABCDEFGH";
+const parseWhen = (v) => {
+  if (!v) return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+const cleanDepts = (v) =>
+  [...new Set((Array.isArray(v) ? v : String(v ?? "").split(/[,;\n]/)).map((d) => cleanText(d, 120)).filter(Boolean))].slice(0, 30);
+
+async function trainerRoutes(req, seg, sql, me) {
   const m = req.method;
   const id = toInt(seg[2]);
 
-  if (seg[1] === "login" && m === "POST") return json({ ok: true });
+  if (seg[1] === "login" && m === "POST") return json({ ok: true, role: me.role, name: me.name, depts: me.depts });
+
+  /* ---------- users (administrator only) ---------- */
+  if (seg[1] === "users") {
+    if (seg.length === 2 && m === "GET") {
+      return json(await sql`SELECT id, name, role, depts, key_hint, active, last_login_at, created_at FROM app_users ORDER BY role, name`);
+    }
+    if (seg.length === 2 && m === "POST") {
+      const b = await readBody(req);
+      const name = cleanText(b.name, 120);
+      const role = b.role === "hod" ? "hod" : "trainer";
+      const depts = cleanDepts(b.depts);
+      if (!name) return fail("Enter the person's name.");
+      if (role === "hod" && !depts.length) return fail("Enter at least one department for the HOD.");
+      const key = newKey(role === "hod" ? "H" : "T");
+      const [row] = await sql`INSERT INTO app_users (name, role, depts, key_hash, key_hint)
+        VALUES (${name}, ${role}, ${J(depts)}::jsonb, ${sha256(key)}, ${key.slice(-4)})
+        RETURNING id, name, role, depts, key_hint, active, last_login_at, created_at`;
+      return json({ ...row, key }, 201);
+    }
+    if (seg.length === 3 && m === "PUT") {
+      const b = await readBody(req);
+      const [u] = await sql`SELECT * FROM app_users WHERE id = ${id}`;
+      if (!u) return fail("User not found", 404);
+      const role = b.role ? (b.role === "hod" ? "hod" : "trainer") : u.role;
+      const depts = b.depts !== undefined ? cleanDepts(b.depts) : u.depts;
+      if (role === "hod" && !depts.length) return fail("Enter at least one department for the HOD.");
+      const [row] = await sql`UPDATE app_users SET name = ${cleanText(b.name ?? u.name, 120)}, role = ${role},
+        depts = ${J(depts)}::jsonb, active = ${b.active ?? u.active}
+        WHERE id = ${id} RETURNING id, name, role, depts, key_hint, active, last_login_at, created_at`;
+      return json(row);
+    }
+    if (seg.length === 4 && seg[3] === "reset" && m === "POST") {
+      const [u] = await sql`SELECT role FROM app_users WHERE id = ${id}`;
+      if (!u) return fail("User not found", 404);
+      const key = newKey(u.role === "hod" ? "H" : "T");
+      await sql`UPDATE app_users SET key_hash = ${sha256(key)}, key_hint = ${key.slice(-4)} WHERE id = ${id}`;
+      return json({ key });
+    }
+    if (seg.length === 3 && m === "DELETE") {
+      await sql`DELETE FROM app_users WHERE id = ${id}`;
+      return json({ ok: true });
+    }
+  }
+
+  /* ---------- department (HOD) view ---------- */
+  if (seg[1] === "hod" && seg.length === 2 && m === "GET") {
+    await syncDue(sql);
+    const fromAttempts = await sql`SELECT DISTINCT trim(dept) AS d FROM attempts WHERE dept IS NOT NULL AND trim(dept) <> ''`;
+    const fromRoster = await sql`SELECT DISTINCT trim(r->>'dept') AS d FROM sessions, jsonb_array_elements(roster) r
+                                 WHERE coalesce(trim(r->>'dept'), '') <> ''`;
+    const seen = new Map();
+    for (const { d } of [...fromAttempts, ...fromRoster]) if (!seen.has(normDept(d))) seen.set(normDept(d), d);
+    const available = me.role === "hod" ? me.depts : [...seen.values()].sort((a, b) => a.localeCompare(b));
+    const want = new URL(req.url).searchParams.get("dept");
+    let depts = me.role === "hod" ? me.depts : [];
+    if (want && (me.role !== "hod" || me.depts.some((d) => normDept(d) === normDept(want)))) depts = [want];
+    const keys = depts.map(normDept);
+    if (!keys.length) return json({ available, depts, sessions: [], attempts: [], topics: [] });
+
+    const att = await sql`SELECT * FROM attempts WHERE submitted_at IS NOT NULL AND lower(trim(dept)) = ANY(${keys}::text[])
+                          ORDER BY submitted_at DESC`;
+    const ids = [...new Set(att.map((a) => a.session_id))];
+    const sess = await sql`SELECT * FROM sessions WHERE id = ANY(${ids}::int[])
+      OR EXISTS (SELECT 1 FROM jsonb_array_elements(roster) r WHERE lower(trim(r->>'dept')) = ANY(${keys}::text[]))
+      ORDER BY created_at DESC`;
+    const byId = new Map(sess.map((x) => [x.id, x]));
+    const topics = {};
+    const attempts = att.map((a) => {
+      const s = byId.get(a.session_id);
+      const { statuses } = scoreAnswers(s.questions, a.answers, s.negative_mark);
+      s.questions.forEach((q, i) => {
+        const t = q.topic || "General";
+        topics[t] ??= { topic: t, correct: 0, total: 0 };
+        topics[t].total++;
+        if (statuses[i] === "correct") topics[t].correct++;
+      });
+      return { id: a.id, sessionId: a.session_id, title: s.title, stype: s.stype, empId: a.emp_id, name: a.name, dept: a.dept,
+        percent: Number(a.percent), passed: a.passed, submittedAt: a.submitted_at, mode: a.mode, trainingDate: s.training_date, ...certInfo(s, a) };
+    });
+    const sessions = sess.map((s) => {
+      const mine = attempts.filter((a) => a.sessionId === s.id);
+      const done = new Set(mine.map((a) => a.empId));
+      const expected = s.roster.filter((r) => keys.includes(normDept(r.dept)));
+      return { id: s.id, code: s.code, title: s.title, stype: s.stype, status: s.status, trainingDate: s.training_date || s.created_at,
+        openAt: s.open_at, closeAt: s.close_at, passMark: s.pass_mark, taken: mine.length, passed: mine.filter((a) => a.passed).length,
+        avg: mine.length ? Math.round((mine.reduce((x, a) => x + a.percent, 0) / mine.length) * 10) / 10 : null,
+        expected: expected.length, notTaken: expected.filter((r) => !done.has(cleanEmp(r.empId))).map((r) => ({ empId: r.empId, name: r.name, dept: r.dept })) };
+    });
+    return json({ available, depts, sessions, attempts, topics: Object.values(topics) });
+  }
+
+  if (seg[1] === "hod" && seg[2] === "card" && seg.length === 4 && m === "GET") {
+    const [a] = await sql`SELECT * FROM attempts WHERE id = ${toInt(seg[3])} AND submitted_at IS NOT NULL`;
+    if (!a) return fail("Result not found.", 404);
+    if (me.role === "hod" && !me.depts.some((d) => normDept(d) === normDept(a.dept))) return fail("This person is not in your department.", 403);
+    const [s] = await sql`SELECT * FROM sessions WHERE id = ${a.session_id}`;
+    return json({ result: buildResult({ ...s, show_answers: true }, a) });
+  }
 
   if (seg[1] === "ai-status" && m === "GET") {
     const c = aiConfig();
@@ -598,6 +813,7 @@ async function trainerRoutes(req, seg, sql) {
       return fail(e.message || "AI request failed.", 502);
     }
     const sourceName = cleanText(b.sourceName, 120);
+    raw = Array.isArray(raw) ? raw : raw?.questions ?? [];
     const list = raw
       .map(normalizeQuestion)
       .filter(Boolean)
@@ -612,9 +828,10 @@ async function trainerRoutes(req, seg, sql) {
   /* ---------- sessions ---------- */
   if (seg[1] === "sessions" && seg.length === 2) {
     if (m === "GET") {
+      await syncDue(sql);
       const rows = await sql`
         SELECT s.id, s.code, s.title, s.trainer, s.venue, s.training_date, s.stype, s.status, s.pass_mark,
-               s.time_limit_min, s.pre_session_id, s.created_at, jsonb_array_length(s.questions) AS question_count,
+               s.time_limit_min, s.pre_session_id, s.source_session_id, s.open_at, s.close_at, s.created_at, jsonb_array_length(s.questions) AS question_count,
                jsonb_array_length(s.roster) AS roster_count,
                COUNT(a.id)::int AS joined,
                COUNT(a.id) FILTER (WHERE a.submitted_at IS NOT NULL)::int AS submitted,
@@ -627,11 +844,12 @@ async function trainerRoutes(req, seg, sql) {
       const b = await readBody(req);
       const title = cleanText(b.title, 200);
       if (!title) return fail("Give the session a title.");
+      const copyId = toInt(b.copyFromSessionId);
       const qids = (b.questionIds || []).map((x) => toInt(x)).filter(Boolean);
-      if (!qids.length) return fail("Pick at least one approved question.");
-      const found = await sql`SELECT * FROM questions WHERE id = ANY(${qids}::int[]) AND status = 'approved'`;
+      if (!qids.length && !copyId) return fail("Pick at least one approved question.");
+      const found = qids.length ? await sql`SELECT * FROM questions WHERE id = ANY(${qids}::int[]) AND status = 'approved'` : [];
       const byId = new Map(found.map((q) => [q.id, q]));
-      const snapshot = qids
+      let snapshot = qids
         .filter((q) => byId.has(q))
         .map((q) => {
           const r = byId.get(q);
@@ -640,22 +858,31 @@ async function trainerRoutes(req, seg, sql) {
             explanation: r.explanation, topic: r.topic, difficulty: r.difficulty,
           };
         });
+      if (copyId) {
+        const [src] = await sql`SELECT questions FROM sessions WHERE id = ${copyId}`;
+        if (src) snapshot = src.questions;
+      }
       if (!snapshot.length) return fail("None of the picked questions are approved yet.");
+      const openAt = parseWhen(b.openAt), closeAt = parseWhen(b.closeAt);
+      if (openAt && closeAt && closeAt <= openAt) return fail("The closing time must be after the opening time.");
       const roster = (Array.isArray(b.roster) ? b.roster : [])
         .map((r) => ({ empId: cleanEmp(r.empId), name: cleanText(r.name, 120), dept: cleanText(r.dept, 120) }))
         .filter((r) => r.empId)
         .slice(0, 2000);
-      const stype = ["pre", "post", "standalone"].includes(b.stype) ? b.stype : "standalone";
+      const stype = ["pre", "post", "standalone", "retention"].includes(b.stype) ? b.stype : "standalone";
       for (let tries = 0; tries < 5; tries++) {
         try {
           const [row] = await sql`
             INSERT INTO sessions (code, title, trainer, venue, training_date, stype, pre_session_id, time_limit_min,
-              pass_mark, shuffle, show_answers, negative_mark, questions, roster)
+              pass_mark, shuffle, show_answers, negative_mark, questions, roster,
+              source_session_id, open_at, close_at, issue_certificates, cert_valid_months)
             VALUES (${newCode()}, ${title}, ${cleanText(b.trainer, 120) || null}, ${cleanText(b.venue, 120) || null},
               ${b.trainingDate || null}, ${stype}, ${toInt(b.preSessionId) || null},
               ${Math.min(Math.max(toInt(b.timeLimitMin), 0), 600)}, ${Math.min(Math.max(toInt(b.passMark, 60), 0), 100)},
               ${b.shuffle !== false}, ${b.showAnswers !== false}, ${Math.min(Math.max(Number(b.negativeMark) || 0, 0), 1)},
-              ${J(snapshot)}::jsonb, ${J(roster)}::jsonb)
+              ${J(snapshot)}::jsonb, ${J(roster)}::jsonb,
+              ${toInt(b.sourceSessionId) || null}, ${openAt}, ${closeAt}, ${b.issueCertificates !== false},
+              ${Math.min(Math.max(toInt(b.certValidMonths), 0), 120)})
             RETURNING *`;
           return json(row, 201);
         } catch (e) {
@@ -667,22 +894,16 @@ async function trainerRoutes(req, seg, sql) {
   }
 
   if (seg[1] === "sessions" && seg.length >= 3) {
-    const [s] = await sql`SELECT * FROM sessions WHERE id = ${id}`;
+    let [s] = await sql`SELECT * FROM sessions WHERE id = ${id}`;
     if (!s) return fail("Session not found", 404);
 
     if (seg.length === 3 && m === "GET") {
+      s = await syncStatus(sql, s);
       const attempts = await sql`SELECT id, emp_id, name, dept, mode, answers, tab_switches, started_at, submitted_at,
-                                        score, max_score, percent, passed
+                                        score, max_score, percent, passed, cert_code, scan_flags
                                  FROM attempts WHERE session_id = ${id} ORDER BY started_at`;
-      let pre = [];
-      let preTitle = null;
-      if (s.pre_session_id) {
-        pre = await sql`SELECT emp_id, percent FROM attempts
-                        WHERE session_id = ${s.pre_session_id} AND submitted_at IS NOT NULL`;
-        const [ps] = await sql`SELECT title FROM sessions WHERE id = ${s.pre_session_id}`;
-        preTitle = ps?.title ?? null;
-      }
-      return json({ session: s, attempts, pre, preTitle, serverNow: new Date().toISOString() });
+      const chain = await chainOf(sql, s);
+      return json({ session: s, attempts, chain, serverNow: new Date().toISOString() });
     }
 
     if (seg.length === 3 && m === "PUT") {
@@ -698,7 +919,11 @@ async function trainerRoutes(req, seg, sql) {
           venue = ${cleanText(b.venue ?? s.venue, 120) || null}, training_date = ${b.trainingDate ?? s.training_date},
           time_limit_min = ${Math.min(Math.max(toInt(b.timeLimitMin ?? s.time_limit_min), 0), 600)},
           pass_mark = ${Math.min(Math.max(toInt(b.passMark ?? s.pass_mark), 0), 100)},
-          show_answers = ${b.showAnswers ?? s.show_answers}, roster = ${J(roster)}::jsonb
+          show_answers = ${b.showAnswers ?? s.show_answers}, roster = ${J(roster)}::jsonb,
+          open_at = ${"openAt" in b ? parseWhen(b.openAt) : s.open_at},
+          close_at = ${"closeAt" in b ? parseWhen(b.closeAt) : s.close_at},
+          issue_certificates = ${b.issueCertificates ?? s.issue_certificates},
+          cert_valid_months = ${Math.min(Math.max(toInt(b.certValidMonths ?? s.cert_valid_months), 0), 120)}
         WHERE id = ${id} RETURNING *`;
       return json(row);
     }
@@ -711,7 +936,8 @@ async function trainerRoutes(req, seg, sql) {
     if (seg[3] === "status" && m === "POST") {
       const b = await readBody(req);
       if (b.status === "open") {
-        const [row] = await sql`UPDATE sessions SET status = 'open', opened_at = COALESCE(opened_at, now()), closed_at = NULL
+        const [row] = await sql`UPDATE sessions SET status = 'open', opened_at = COALESCE(opened_at, now()), closed_at = NULL,
+                                  close_at = CASE WHEN close_at IS NOT NULL AND close_at <= now() THEN NULL ELSE close_at END
                                 WHERE id = ${id} RETURNING *`;
         return json(row);
       }
@@ -738,11 +964,59 @@ async function trainerRoutes(req, seg, sql) {
         return fail(`${empId} already has a ${existing.mode} entry in this session. Tick "Replace existing" to overwrite.`, 409);
       if (existing) await sql`DELETE FROM attempts WHERE id = ${existing.id}`;
       const layout = s.questions.map((q, i) => ({ q: i, o: q.options.map((_, j) => j) }));
+      const flags = Array.isArray(b.scanFlags) ? b.scanFlags.map(Number).filter((x) => Number.isInteger(x) && x >= 0 && x < s.questions.length) : null;
       const [a] = await sql`
-        INSERT INTO attempts (session_id, emp_id, name, dept, token, layout, mode)
-        VALUES (${id}, ${empId}, ${name}, ${dept}, ${crypto.randomUUID()}, ${J(layout)}::jsonb, 'paper') RETURNING *`;
+        INSERT INTO attempts (session_id, emp_id, name, dept, token, layout, mode, scan_flags)
+        VALUES (${id}, ${empId}, ${name}, ${dept}, ${crypto.randomUUID()}, ${J(layout)}::jsonb, 'paper', ${flags ? J(flags) : null}::jsonb) RETURNING *`;
       const done = await finalize(sql, s, a, answers);
       return json({ ok: true, result: buildResult({ ...s, show_answers: true }, done) }, 201);
+    }
+
+    // POST /api/admin/sessions/:id/scan — read a photographed answer sheet with AI
+    if (seg[3] === "scan" && m === "POST") {
+      const b = await readBody(req);
+      const img = b.image;
+      if (!img || !/^image\/(png|jpe?g|webp)$/.test(img.mime) || typeof img.data !== "string") return fail("Send a photo of the answer sheet.");
+      const rows = s.questions
+        .map((q, i) => `${i + 1}: options ${LETTERS.slice(0, q.options.length).split("").join(" ")} — ${q.qtype === "multi" ? "one or more marks allowed" : "exactly one mark expected"}`)
+        .join("\n");
+      const system = `You read photographed paper answer sheets for a multiple-choice test at an Indian cement plant.
+Return ONLY a JSON object, no prose, no code fences:
+{"empId":"","name":"","dept":"","answers":{"1":["B"],"2":["A","C"]},"unclear":[3,7]}
+Rules:
+- Rows are numbered; each row has lettered bubbles. A bubble counts as marked if it is filled, shaded, ticked, crossed or circled.
+- If one mark is struck through or scribbled out and another mark exists in the row, use the remaining mark.
+- Leave a row out of "answers" (or use []) if nothing is marked.
+- Put a row number in "unclear" if the marks are faint, ambiguous, or a single-answer row has more than one mark. Still give your best reading in "answers".
+- Read the handwritten Emp ID, Name and Department exactly as written; use "" if unreadable. Emp ID is usually letters and digits.
+- Never guess answers from the content of the questions — read only the marks.`;
+      const user = `The sheet has ${s.questions.length} rows:\n${rows}\nRead this answer sheet.`;
+      let raw;
+      try {
+        raw = await callAI({ system, user, images: [{ mime: img.mime, data: img.data }] });
+      } catch (e) {
+        return fail(e.message || "Could not read the photo.", 502);
+      }
+      const answers = {};
+      for (const [k, v] of Object.entries(raw?.answers || {})) {
+        const i = toInt(k) - 1;
+        const picks = (Array.isArray(v) ? v : String(v).split(/[ ,;]+/))
+          .map((x) => String(x).trim().toUpperCase())
+          .filter((x) => /^[A-H]$/.test(x))
+          .map((x) => x.charCodeAt(0) - 65);
+        if (i >= 0 && picks.length) answers[i] = picks;
+      }
+      const clean = sanitizeAnswers(answers, s.questions);
+      const unclear = new Set((Array.isArray(raw?.unclear) ? raw.unclear : []).map((x) => toInt(x) - 1).filter((x) => x >= 0 && x < s.questions.length));
+      Object.keys(answers).forEach((k) => {
+        if (s.questions[k] && s.questions[k].qtype !== "multi" && answers[k].length > 1) unclear.add(Number(k));
+      });
+      const empId = cleanEmp(raw?.empId);
+      const hit = s.roster.find((r) => cleanEmp(r.empId) === empId);
+      const [existing] = empId ? await sql`SELECT mode FROM attempts WHERE session_id = ${id} AND emp_id = ${empId}` : [];
+      // the participant list is more reliable than handwriting
+      return json({ empId, name: hit?.name || cleanText(raw?.name, 120), dept: hit?.dept || cleanText(raw?.dept, 120),
+        inRoster: Boolean(hit), answers: clean, unclear: [...unclear].sort((a, b) => a - b), existing: existing?.mode ?? null });
     }
 
     // GET /api/admin/sessions/:id/attempts/:aid — full result card
@@ -770,9 +1044,11 @@ export default async (req) => {
   try {
     const sql = sqlOf();
     if (seg[0] === "admin") {
-      if (!env("TRAINER_KEY")) return fail("TRAINER_KEY is not set on the server.", 500);
-      if (!isTrainer(req)) return fail("Wrong trainer key.", 401);
-      return (await trainerRoutes(req, seg, sql)) ?? fail("Not found", 404);
+      const me = await whoAmI(req, sql);
+      if (!me) return env("TRAINER_KEY") ? fail("Wrong key.", 401) : fail("TRAINER_KEY is not set on the server.", 500);
+      if (me.role === "hod" && !["login", "hod"].includes(seg[1])) return fail("Your key only opens the department view.", 403);
+      if (seg[1] === "users" && me.role !== "admin") return fail("Only the administrator can manage users.", 403);
+      return (await trainerRoutes(req, seg, sql, me)) ?? fail("Not found", 404);
     }
     return (await publicRoutes(req, seg, sql)) ?? fail("Not found", 404);
   } catch (e) {

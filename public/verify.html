@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Certificate check</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✅</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Condensed:wght@600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+<style>
+  main{max-width:560px;margin:0 auto;padding:1.4rem 1rem 3rem}
+  .logos{display:flex;justify-content:space-between;align-items:center;margin-bottom:1.4rem}
+  .logos img{height:44px;border-radius:3px}
+  .verdict{display:flex;align-items:center;gap:.9rem;padding:1rem 1.1rem;border-radius:var(--radius);margin-bottom:1rem}
+  .verdict .ic{width:46px;height:46px;border-radius:50%;display:grid;place-items:center;font:700 1.6rem/1 var(--display);flex:none;color:#fff}
+  .verdict h1{margin:0;font-size:1.7rem}
+  .ok{background:var(--pass-soft);color:var(--pass)} .ok .ic{background:var(--pass)}
+  .bad{background:var(--fail-soft);color:var(--fail)} .bad .ic{background:var(--fail)}
+  .warn{background:var(--warn-soft);color:var(--warn)} .warn .ic{background:var(--warn)}
+  dl{display:grid;grid-template-columns:auto 1fr;gap:.55rem 1rem;margin:0}
+  dt{color:var(--muted);font-size:.9rem}
+  dd{margin:0;font-weight:600}
+  form{display:flex;gap:.5rem;margin-top:1.2rem}
+  form input{text-transform:uppercase;letter-spacing:.08em}
+</style>
+</head>
+<body>
+<main>
+  <div class="logos"><img src="/logo-mhg.png" alt="My Home Group"><img src="/logo-maha.png" alt="Maha Cement"></div>
+  <div id="out"><p class="muted"><span class="spinner"></span> Checking…</p></div>
+  <form id="f"><input type="text" id="c" placeholder="Certificate number" aria-label="Certificate number" autocomplete="off"><button class="btn primary">Check</button></form>
+  <p class="small muted" style="margin-top:1rem">This page confirms training certificates issued by the Training Assessment system. Only basic details are shown.</p>
+</main>
+<script src="/common.js"></script>
+<script>
+const out = document.getElementById("out");
+async function check(code) {
+  code = String(code || "").trim().toUpperCase();
+  document.getElementById("c").value = code;
+  if (!code) { out.innerHTML = `<p class="muted">Enter the certificate number printed under the QR code.</p>`; return; }
+  out.innerHTML = `<p class="muted"><span class="spinner"></span> Checking…</p>`;
+  let r;
+  try { const res = await fetch("/api/verify/" + encodeURIComponent(code)); r = await res.json(); }
+  catch { out.innerHTML = `<div class="notice err">Couldn't check right now. Try again.</div>`; return; }
+  if (!r.certCode) {
+    out.innerHTML = `<div class="verdict bad"><span class="ic">✕</span><div><h1>Not found</h1><div>No valid certificate has the number ${esc(code)}.</div></div></div>`;
+    return;
+  }
+  const cls = r.expired ? "warn" : "ok";
+  out.innerHTML = `<div class="verdict ${cls}"><span class="ic">${r.expired ? "!" : "✓"}</span><div><h1>${r.expired ? "Expired" : "Valid certificate"}</h1>
+      <div>${r.expired ? `It was valid until ${fmtDate(r.validUntil)}.` : r.validUntil ? `Valid until ${fmtDate(r.validUntil)}.` : "No expiry date."}</div></div></div>
+    <div class="panel"><dl>
+      <dt>Name</dt><dd>${esc(r.name)}</dd>
+      <dt>Employee ID</dt><dd>${esc(r.empId)}</dd>
+      ${r.dept ? `<dt>Department</dt><dd>${esc(r.dept)}</dd>` : ""}
+      <dt>Training</dt><dd>${esc(r.title)}</dd>
+      <dt>Date</dt><dd>${fmtDate(r.trainingDate || r.issuedAt)}</dd>
+      <dt>Score</dt><dd>${r.percent}%</dd>
+      ${r.trainer ? `<dt>Trainer</dt><dd>${esc(r.trainer)}</dd>` : ""}
+      <dt>Certificate no.</dt><dd class="num" style="letter-spacing:.06em">${esc(r.certCode)}</dd>
+    </dl></div>`;
+}
+document.getElementById("f").onsubmit = (e) => { e.preventDefault(); history.replaceState(null, "", "/v/" + document.getElementById("c").value.trim().toUpperCase()); check(document.getElementById("c").value); };
+check((location.pathname.match(/\/v\/([A-Za-z0-9]+)/) || [])[1] || new URLSearchParams(location.search).get("c"));
+</script>
+</body>
+</html>
