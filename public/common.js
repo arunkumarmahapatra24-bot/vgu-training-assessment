@@ -126,25 +126,56 @@ function resultCardHTML(r) {
   <div class="foot">Submitted ${fmtDateTime(r.submittedAt)}</div></div>`;
 }
 
-function questionPaperHTML(s, withKey) {
-  const qs = s.questions.map((q, i) => `<div class="q"><b>${i + 1}. ${esc(q.text)}</b>${q.qtype === "multi" ? " <i>(tick all correct answers)</i>" : ""}
-    <div class="opts">${q.options.map((o, j) => `<div${withKey && q.answer.includes(j) ? ' class="ok"' : ""}>${LETTERS[j]}. ${esc(o)}${withKey && q.answer.includes(j) ? " ✔" : ""}</div>`).join("")}</div>
-    ${withKey && q.explanation ? `<div style="font-size:9.5pt;margin-left:18px">Why: ${esc(q.explanation)}</div>` : ""}</div>`).join("");
-  return `${printHeader(withKey ? "Answer Key — Trainer Copy" : "Question Paper", s.title)}
-  <p>${STYPE[s.stype]} · ${s.questions.length} questions${s.time_limit_min ? ` · ${s.time_limit_min} min` : ""} · Pass mark ${s.pass_mark}%${Number(s.negative_mark) ? ` · ${s.negative_mark} mark deducted per wrong answer` : ""}</p>${qs}`;
+/* Printed paper sets: same questions, different order per set. Must match paperLayout() in the server. */
+function paperLayout(session, set) {
+  const qs = session.questions;
+  const S = String(set || "A").toUpperCase();
+  if (S === "A") return qs.map((q, i) => ({ q: i, o: q.options.map((_, j) => j) }));
+  let h = 2166136261;
+  for (const c of `${session.code}|${S}`) h = Math.imul(h ^ c.charCodeAt(0), 16777619);
+  let a = h >>> 0;
+  const rnd = () => { a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const sh = (arr) => { arr = arr.slice(); for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; } return arr; };
+  const order = sh(qs.map((_, i) => i));
+  return order.map((qi) => ({ q: qi, o: qs[qi].qtype === "tf" ? qs[qi].options.map((_, j) => j) : sh(qs[qi].options.map((_, j) => j)) }));
+}
+const SET_BADGE = (set, n) => (n > 1 ? `<div style="float:right;border:3px solid #111;padding:2px 12px;font:bold 20pt Arial;margin:-4px 0 6px 10px">SET ${set}</div>` : "");
+
+function questionPaperHTML(s, withKey, set = "A", nSets = 1) {
+  const L = paperLayout(s, set);
+  const qs = L.map((row, i) => {
+    const q = s.questions[row.q];
+    return `<div class="q"><b>${i + 1}. ${esc(q.text)}</b>${q.qtype === "multi" ? " <i>(tick all correct answers)</i>" : ""}
+    <div class="opts">${row.o.map((oi, j) => { const key = withKey && q.answer.includes(oi);
+      return `<div${key ? ' class="ok"' : ""}>${LETTERS[j]}. ${esc(q.options[oi])}${key ? " ✔" : ""}</div>`; }).join("")}</div>
+    ${withKey && q.explanation ? `<div style="font-size:9.5pt;margin-left:18px">Why: ${esc(q.explanation)}</div>` : ""}</div>`;
+  }).join("");
+  return `<div class="page">${printHeader(withKey ? "Answer Key — Trainer Copy" : "Question Paper", s.title)}${SET_BADGE(set, nSets)}
+  <p>${STYPE[s.stype]} · ${s.questions.length} questions${s.time_limit_min ? ` · ${s.time_limit_min} min` : ""} · Pass mark ${s.pass_mark}%${Number(s.negative_mark) ? ` · ${s.negative_mark} mark deducted per wrong answer` : ""}${nSets > 1 ? ` · <b>Mark SET ${set} on your answer sheet</b>` : ""}</p>${qs}</div>`;
 }
 
-function answerSheetHTML(s, qr, link, copies = 1) {
-  const rows = s.questions.map((q, i) => `<tr><td style="width:34px;text-align:right"><b>${i + 1}</b></td><td>${q.options.map((_, j) => `<span class="bub">${LETTERS[j]}</span>`).join("")}${q.qtype === "multi" ? " <i style=\"font-size:8.5pt\">more than one</i>" : ""}</td></tr>`);
-  const half = Math.ceil(rows.length / 2);
-  const col = (a) => `<table style="width:100%">${a.join("")}</table>`;
-  const one = `<div class="page">${printHeader("Answer Sheet", s.title)}
-  <table class="meta"><tr><td style="width:60%"><b>Emp ID</b> ____________________<br><br><b>Name</b> __________________________<br><br><b>Dept</b> ___________________ &nbsp; <b>Sign</b> ___________</td>
-  <td style="text-align:center"><img src="${qr}" style="width:120px"><br><span style="font-size:8.5pt">Session ${esc(s.code)} — or answer online at<br>${esc(link)}</span></td></tr></table>
-  <p style="font-size:9.5pt;margin:8px 0">Fill or tick the circle of your answer. Mark only one circle unless the question says "more than one".</p>
-  <div style="display:flex;gap:16px"><div style="flex:1">${col(rows.slice(0, half))}</div><div style="flex:1">${col(rows.slice(half))}</div></div>
-  <div class="sig"><div>Participant</div><div>Checked by</div></div></div>`;
-  return Array.from({ length: copies }, () => one).join("");
+function answerKeyCompactHTML(s, sets) {
+  const rows = s.questions.map((_, i) => `<tr><td><b>${i + 1}</b></td>${sets.map((set) => { const row = paperLayout(s, set)[i]; const q = s.questions[row.q];
+    return `<td>${row.o.map((oi, j) => (q.answer.includes(oi) ? LETTERS[j] : "")).join("")}</td>`; }).join("")}</tr>`).join("");
+  return `<div class="page">${printHeader("Answer Key — all sets", s.title)}<table style="width:auto;min-width:50%"><tr><th>Q</th>${sets.map((x) => `<th>Set ${x}</th>`).join("")}</tr>${rows}</table>
+  <p class="foot">Keep this page with the trainer. Detailed keys with explanations follow.</p></div>`;
+}
+
+function answerSheetHTML(s, qr, link, copies = 1, sets = ["A"]) {
+  const one = (set) => {
+    const L = paperLayout(s, set);
+    const rows = L.map((row, i) => { const q = s.questions[row.q];
+      return `<tr><td style="width:34px;text-align:right"><b>${i + 1}</b></td><td>${row.o.map((_, j) => `<span class="bub">${LETTERS[j]}</span>`).join("")}${q.qtype === "multi" ? ' <i style="font-size:8.5pt">more than one</i>' : ""}</td></tr>`; });
+    const half = Math.ceil(rows.length / 2);
+    const col = (a) => `<table style="width:100%">${a.join("")}</table>`;
+    return `<div class="page">${printHeader("Answer Sheet", s.title)}${SET_BADGE(set, sets.length)}
+    <table class="meta"><tr><td style="width:60%"><b>Emp ID</b> ____________________<br><br><b>Name</b> __________________________<br><br><b>Dept</b> ___________________ &nbsp; <b>Sign</b> ___________</td>
+    <td style="text-align:center"><img src="${qr}" style="width:120px"><br><span style="font-size:8.5pt">Session ${esc(s.code)}${sets.length > 1 ? "" : " — or answer online at<br>" + esc(link)}</span></td></tr></table>
+    <p style="font-size:9.5pt;margin:8px 0">${sets.length > 1 ? `<b>Use only with question paper SET ${set}.</b> ` : ""}Fill or tick the circle of your answer. Mark only one circle unless the question says "more than one".</p>
+    <div style="display:flex;gap:16px"><div style="flex:1">${col(rows.slice(0, half))}</div><div style="flex:1">${col(rows.slice(half))}</div></div>
+    <div class="sig"><div>Participant</div><div>Checked by</div></div></div>`;
+  };
+  return Array.from({ length: copies }, (_, k) => one(sets[k % sets.length])).join("");
 }
 
 function qrPosterHTML(s, qr, link) {

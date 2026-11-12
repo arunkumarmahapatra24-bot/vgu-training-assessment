@@ -119,7 +119,17 @@ function showJoin(errMsg) {
     <label class="f"><span>Full name</span><input type="text" id="name" autocomplete="name" required></label>
     <label class="f"><span>Department</span><input type="text" id="dept" autocomplete="organization-title"></label>
     <button class="btn primary block" type="submit" id="go">${info.status === "closed" ? "Show my result" : "Start test"}</button>
-  </form>`;
+  </form>
+  <details class="panel" style="margin-top:1rem"><summary style="cursor:pointer;font-weight:600">How to take this test</summary>
+    <ol style="padding-left:1.2rem;margin:.6rem 0 0">
+      <li>Enter <b>your own</b> Employee ID. If you are on the list, your name fills in.</li>
+      <li>Answer one question per screen. Tap an answer again to clear it. Use <b>All</b> to jump to any question.</li>
+      <li>${info.timeLimitMin ? `You have <b>${info.timeLimitMin} minutes</b>. When time runs out your answers are submitted automatically.` : "There is no time limit."}</li>
+      <li>Stay on this page. Switching to other apps is recorded for the trainer.</li>
+      <li>If the network drops, keep the page open — your answers are saved on this phone and sent when it reconnects.</li>
+      <li>On the last screen, dark numbers are answered. Then press <b>Submit answers</b>.</li>
+      <li>After submitting you can download your result${info.passMark ? " and, if you pass, your certificate" : ""}.</li>
+    </ol></details>`;
   const empEl = document.getElementById("empId");
   empEl.addEventListener("change", async () => {
     if (!info.hasRoster || !empEl.value.trim()) return;

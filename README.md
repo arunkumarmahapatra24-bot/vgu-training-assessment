@@ -50,3 +50,20 @@ If the first deploy fails with "Access Denied" on creating the database, run `ne
 - **People and keys** (Settings, administrator only): give each trainer and HOD their own key. HODs only see their departments.
 - **Read paper answer sheets from photos** (Paper entry): AI reads the marks, you check the outlined rows and save.
 - Database changes are in `netlify/database/migrations/20261112090000_phase2.sql` and apply automatically on deploy. Existing results keep working; people who already passed get a certificate number.
+
+## Update 3 (added)
+- **Help** tab for everyone, with search; "How to take this test" panel on the phone page.
+- **Upload Excel / CSV** for participant lists (New session and Session settings), plus a participant template.
+- **Settings → Data and backup**: counts and database size, full backup (.json), restore into an empty app, training register (Excel). HODs: Departments → Download register.
+- No database change in this update.
+
+## Update 4 (added)
+- **Departments and trainers** (Settings, MR only): department list, limit of trainers per department (default 5), assign trainers per department.
+- Trainers with department(s) see and run only their department's tests, banks (plus "Shared" banks) and results. Trainers without a department are plant-wide.
+- Sessions and question banks carry a department; the Sessions page can be filtered by department.
+- Database change: `20261113090000_departments.sql` (applies automatically on deploy).
+
+## Update 5 (added)
+- **Paper sets A–D**: Print paper test → 1 to 4 sets; same questions, different question and option order per set. Ready-to-hand-out pack (sets alternate), master per set, or answer sheets only. Answer key covers all sets.
+- Paper entry has a set selector; photo reading reads the SET letter from the sheet. Results show "paper · set B".
+- Database change: `20261114090000_paper_sets.sql`.

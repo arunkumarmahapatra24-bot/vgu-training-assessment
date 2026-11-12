@@ -95,6 +95,7 @@
       <a href="#banks" data-nav="banks" data-roles="admin trainer">Question banks</a>
       <a href="#dept" data-nav="dept" data-roles="admin trainer hod">Departments</a>
       <a href="#settings" data-nav="settings" data-roles="admin trainer hod">Settings</a>
+      <a href="#help" data-nav="help" data-roles="admin trainer hod">Help</a>
     </nav>
     <button class="btn sm ghost" id="signout">Sign out</button>
   </div>
@@ -169,7 +170,7 @@ async function route() {
   document.getElementById("hdr").hidden = false;
   document.querySelectorAll("[data-roles]").forEach((a) => (a.hidden = !a.dataset.roles.split(" ").includes(me.role)));
   let h = location.hash.replace(/^#/, "") || (me.role === "hod" ? "dept" : "sessions");
-  if (me.role === "hod" && !/^(dept|settings)/.test(h)) { h = "dept"; history.replaceState(null, "", "#dept"); }
+  if (me.role === "hod" && !/^(dept|settings|help)/.test(h)) { h = "dept"; history.replaceState(null, "", "#dept"); }
   const [view, id] = h.split("-");
   document.querySelectorAll("[data-nav]").forEach((a) => {
     const on = a.dataset.nav === (view === "bank" ? "banks" : view === "session" ? "sessions" : view);
@@ -181,6 +182,7 @@ async function route() {
   if (view === "session") return viewSession(Number(id));
   if (view === "settings") return viewSettings();
   if (view === "dept") return viewDept();
+  if (view === "help") return viewHelp(id);
   return viewSessions();
 }
 window.addEventListener("hashchange", route);
@@ -223,8 +225,8 @@ async function viewBanks() {
     list.innerHTML = `<div class="panel"><h3>Start with a question bank</h3><p class="muted">Create one for each training topic, for example "LOTO" or "Cement testing — IS 4031". Then add questions from your PDF, Word, PowerPoint or photos of a question paper.</p><button class="btn primary" id="nb2">New question bank</button></div>`;
     return (document.getElementById("nb2").onclick = () => bankForm());
   }
-  list.innerHTML = `<div class="panel scroll-x" style="padding:0"><table class="t"><thead><tr><th>Bank</th><th class="hide-sm">Topic</th><th class="r">Approved</th><th class="r">Drafts</th><th class="hide-sm">Created</th></tr></thead><tbody>
-    ${banks.map((b) => `<tr class="rowlink" data-id="${b.id}"><td><a href="#bank-${b.id}"><b>${esc(b.name)}</b></a></td><td class="hide-sm">${esc(b.topic || "")}</td>
+  list.innerHTML = `<div class="panel scroll-x" style="padding:0"><table class="t"><thead><tr><th>Bank</th><th class="hide-sm">Department</th><th class="hide-sm">Topic</th><th class="r">Approved</th><th class="r">Drafts</th><th class="hide-sm">Created</th></tr></thead><tbody>
+    ${banks.map((b) => `<tr class="rowlink" data-id="${b.id}"><td><a href="#bank-${b.id}"><b>${esc(b.name)}</b></a></td><td class="hide-sm">${b.dept ? `<span class="chip">${esc(b.dept)}</span>` : `<span class="chip">Shared</span>`}</td><td class="hide-sm">${esc(b.topic || "")}</td>
       <td class="r num">${b.approved}</td><td class="r num">${b.total - b.approved ? `<span class="chip warn">${b.total - b.approved}</span>` : "0"}</td><td class="hide-sm muted">${fmtDate(b.created_at)}</td></tr>`).join("")}
   </tbody></table></div>`;
   list.querySelectorAll("tr[data-id]").forEach((tr) => (tr.onclick = (e) => { if (e.target.tagName !== "A") location.hash = "bank-" + tr.dataset.id; }));
@@ -234,12 +236,14 @@ function bankForm(bank) {
   const w = openModal(`<header><h2>${bank ? "Rename question bank" : "New question bank"}</h2><button class="btn ghost" data-close aria-label="Close">✕</button></header>
     <form id="bf"><label class="f"><span>Name</span><input type="text" id="bn" required value="${esc(bank?.name || "")}" placeholder="LOTO — isolation and permits"></label>
     <label class="f"><span>Topic</span><input type="text" id="bt" value="${esc(bank?.topic || "")}" placeholder="Safety"><small>Used as the topic label for questions that don't have one.</small></label>
+    <label class="f"><span>Department</span><select id="bd"><option>Loading…</option></select><small>"Shared" banks can be used by every trainer.</small></label>
     <div class="row" style="justify-content:flex-end"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">${bank ? "Save" : "Create bank"}</button></div></form>`);
+  getDeptNames().then((dn) => (w.querySelector("#bd").innerHTML = deptOptions(dn.names, bank ? bank.dept : (dn.scoped ? dn.names[0] : ""), false, "Shared by all departments"))).catch(() => {});
   w.querySelectorAll("[data-close]").forEach((b) => (b.onclick = closeModal));
   w.querySelector("#bf").onsubmit = async (e) => {
     e.preventDefault();
     try {
-      const body = { name: w.querySelector("#bn").value, topic: w.querySelector("#bt").value };
+      const body = { name: w.querySelector("#bn").value, topic: w.querySelector("#bt").value, dept: w.querySelector("#bd").value || null };
       const r = bank ? await adm("PUT", "/banks/" + bank.id, body) : await adm("POST", "/banks", body);
       closeModal(); location.hash = "bank-" + r.id; if (bank) route();
     } catch (er) { toast(er.message); }
@@ -258,7 +262,7 @@ async function viewBank(id) {
   const drafts = qs.filter((q) => q.status === "draft").length;
 
   app.innerHTML = `<div class="crumb"><a href="#banks">Question banks</a></div>
-  <div class="pagehead"><div><h1>${esc(bank.name)}</h1><p class="muted" style="margin:0">${qs.length - drafts} approved · ${drafts} waiting for review${bank.topic ? " · " + esc(bank.topic) : ""}</p></div>
+  <div class="pagehead"><div><h1>${esc(bank.name)}</h1><p class="muted" style="margin:0">${bank.dept ? esc(bank.dept) : "Shared"} · ${qs.length - drafts} approved · ${drafts} waiting for review${bank.topic ? " · " + esc(bank.topic) : ""}</p></div>
     <div class="row"><button class="btn" id="ren">Rename</button><button class="btn danger" id="delb">Delete bank</button></div></div>
   <div class="toolbar">
     <button class="btn primary" id="fromdoc">Add from documents</button>
@@ -630,16 +634,36 @@ async function viewSessions() {
       <div class="row"><a class="btn" href="#banks">Go to question banks</a><button class="btn primary" id="ns2">New session</button></div></div>`;
     return (document.getElementById("ns2").onclick = () => sessionForm());
   }
-  list.innerHTML = `<div class="panel scroll-x" style="padding:0"><table class="t"><thead><tr><th>Session</th><th>Code</th><th class="hide-sm">Type</th><th class="hide-sm">Date</th><th>Status</th><th class="r">Submitted</th><th class="r">Average</th></tr></thead><tbody>
-  ${rows.map((s) => `<tr class="rowlink" data-id="${s.id}"><td><a href="#session-${s.id}"><b>${esc(s.title)}</b></a>${s.trainer ? `<div class="small muted">${esc(s.trainer)}</div>` : ""}</td>
-    <td class="num" style="letter-spacing:.06em">${s.code}</td><td class="hide-sm">${STYPE[s.stype]}</td><td class="hide-sm">${fmtDate(s.training_date || s.created_at)}</td>
+  const depts = [...new Set(rows.map((r) => r.dept || ""))].sort();
+  const fdept = sessionStorage.getItem("teas:sdept") ?? "*";
+  const shown = rows.filter((r) => fdept === "*" || (r.dept || "") === fdept);
+  list.innerHTML = `${depts.length > 1 ? `<div class="toolbar"><label class="row" style="gap:.5rem"><span class="small" style="font-weight:600">Department</span>
+    <select id="sdf" style="min-width:200px"><option value="*">All</option>${depts.map((d) => `<option value="${esc(d)}" ${d === fdept ? "selected" : ""}>${d ? esc(d) : "Plant-wide"}</option>`).join("")}</select></label>
+    <span class="small muted">${shown.length} of ${rows.length}</span></div>` : ""}
+  <div class="panel scroll-x" style="padding:0"><table class="t"><thead><tr><th>Session</th><th>Code</th><th class="hide-sm">Department</th><th class="hide-sm">Type</th><th class="hide-sm">Date</th><th>Status</th><th class="r">Submitted</th><th class="r">Average</th></tr></thead><tbody>
+  ${shown.map((s) => `<tr class="rowlink" data-id="${s.id}"><td><a href="#session-${s.id}"><b>${esc(s.title)}</b></a>${s.trainer || s.created_by_name ? `<div class="small muted">${esc(s.trainer || "")}${s.created_by_name && s.created_by_name !== s.trainer ? `${s.trainer ? " · " : ""}created by ${esc(s.created_by_name)}` : ""}</div>` : ""}</td>
+    <td class="num" style="letter-spacing:.06em">${s.code}</td><td class="hide-sm">${deptChip(s.dept)}</td><td class="hide-sm">${STYPE[s.stype]}</td><td class="hide-sm">${fmtDate(s.training_date || s.created_at)}</td>
     <td>${statusChip(s)}</td><td class="r num">${s.submitted}${s.roster_count ? ` / ${s.roster_count}` : s.joined > s.submitted ? ` / ${s.joined}` : ""}</td>
     <td class="r num">${s.avg_percent !== null ? Number(s.avg_percent) + "%" : "—"}</td></tr>`).join("")}</tbody></table></div>`;
   list.querySelectorAll("tr[data-id]").forEach((tr) => (tr.onclick = (e) => { if (e.target.tagName !== "A") location.hash = "session-" + tr.dataset.id; }));
+  list.querySelector("#sdf")?.addEventListener("change", (e) => { sessionStorage.setItem("teas:sdept", e.target.value); viewSessions(); });
 }
 const statusChip = (s) => s.status === "open" ? `<span class="chip live">Open${s.close_at ? " · closes " + fmtDateTime(s.close_at) : ""}</span>`
   : s.status === "closed" ? `<span class="chip">Closed</span>`
   : s.open_at ? `<span class="chip warn">Opens ${fmtDateTime(s.open_at)}</span>` : `<span class="chip warn">Not opened</span>`;
+/* departments available to the signed-in person */
+async function getDeptNames() {
+  const r = await adm("GET", "/departments");
+  return r.names ? { names: r.names, scoped: r.scoped } : { names: r.departments.filter((d) => d.active).map((d) => d.name), scoped: false };
+}
+function deptOptions(names, current, scoped, plantLabel = "Plant-wide (all departments)") {
+  const cur = String(current || "").toLowerCase();
+  const list = names.slice();
+  if (current && !list.some((n) => n.toLowerCase() === cur)) list.push(current);
+  return (scoped ? "" : `<option value="">${plantLabel}</option>`) +
+    list.map((n) => `<option value="${esc(n)}" ${n.toLowerCase() === cur ? "selected" : ""}>${esc(n)}</option>`).join("");
+}
+const deptChip = (d) => (d ? `<span class="chip">${esc(d)}</span>` : `<span class="chip">Plant-wide</span>`);
 /* datetime-local helpers (browser local time) */
 const toLocalInput = (iso) => { if (!iso) return ""; const d = new Date(iso); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
 const fromLocalInput = (v) => (v ? new Date(v).toISOString() : null);
@@ -659,13 +683,73 @@ const readSchedule = (w) => ({ openAt: fromLocalInput(w.querySelector("#oa").val
 
 function parseRoster(text) {
   return text.split(/\r?\n/).map((l) => l.split(/\t|,|;/).map((c) => c.trim())).filter((c) => c[0] && !/^emp/i.test(c[0]))
-    .map((c) => ({ empId: c[0], name: c[1] || "", dept: c[2] || "" }));
+    .map((c) => ({ empId: c[0].toUpperCase(), name: c[1] || "", dept: c[2] || "" }));
 }
 const rosterText = (r) => r.map((x) => [x.empId, x.name, x.dept].join(", ")).join("\n");
 
+/* ---------- bulk participant upload (Excel / CSV) ---------- */
+function rosterUploadBar() {
+  return `<div class="toolbar" style="margin-top:-.4rem">
+    <label class="btn sm" style="cursor:pointer">Upload Excel / CSV<input type="file" data-roster-file accept=".xlsx,.xls,.csv,.txt" hidden></label>
+    <button type="button" class="btn sm ghost" data-roster-tpl>Download participant template</button>
+    <span class="small muted" data-roster-msg></span></div>`;
+}
+const normHead = (h) => String(h ?? "").toLowerCase().replace(/[^a-z]/g, "");
+function rowsToRoster(rows) {
+  rows = rows.filter((r) => r.some((c) => String(c ?? "").trim()));
+  if (!rows.length) return { list: [], noId: 0 };
+  // find a header row in the first 5 rows
+  let hi = -1, ci = { id: 0, name: 1, dept: 2 };
+  for (let k = 0; k < Math.min(5, rows.length); k++) {
+    const h = rows[k].map(normHead);
+    const id = h.findIndex((x) => /^(emp|employee|staff|token|personal|pno|id|code|empno|employeeno|empid|employeeid|empcode|employeecode|staffno|idno)/.test(x) && !/name/.test(x));
+    const name = h.findIndex((x) => /name/.test(x) && !/dept|department/.test(x));
+    const dept = h.findIndex((x) => /dept|department|section|division/.test(x));
+    if (id >= 0 && name >= 0) { hi = k; ci = { id, name, dept }; break; }
+  }
+  const body = rows.slice(hi + 1);
+  let noId = 0;
+  const list = [];
+  for (const r of body) {
+    const empId = String(r[ci.id] ?? "").trim().toUpperCase();
+    if (!empId) { noId++; continue; }
+    list.push({ empId, name: String(r[ci.name] ?? "").trim(), dept: ci.dept >= 0 ? String(r[ci.dept] ?? "").trim() : "" });
+  }
+  return { list, noId, header: hi >= 0 };
+}
+function bindRosterUpload(root, textareaSel) {
+  const ta = root.querySelector(textareaSel), msg = root.querySelector("[data-roster-msg]");
+  root.querySelector("[data-roster-tpl]").onclick = async () => {
+    await loadScript(LIB.xlsx);
+    const ws = XLSX.utils.aoa_to_sheet([["Emp ID", "Name", "Department"], ["E1023", "Ravi Kumar", "Mechanical"], ["E1077", "S. Lakshmi", "Quality"]]);
+    ws["!cols"] = [{ wch: 14 }, { wch: 30 }, { wch: 22 }];
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Participants"); XLSX.writeFile(wb, "Participant_List_Template.xlsx");
+  };
+  root.querySelector("[data-roster-file]").onchange = async (e) => {
+    const f = e.target.files[0]; e.target.value = "";
+    if (!f) return;
+    msg.textContent = "Reading…";
+    try {
+      await loadScript(LIB.xlsx);
+      const wb = XLSX.read(await f.arrayBuffer(), { type: "array" });
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: "", raw: false });
+      const { list, noId, header } = rowsToRoster(rows);
+      if (!list.length) { msg.textContent = "No participants found. The first sheet needs columns Emp ID, Name, Department."; return; }
+      const existing = parseRoster(ta.value);
+      const seen = new Set(existing.map((r) => r.empId.toUpperCase()));
+      let dup = 0;
+      const merged = existing.slice();
+      for (const r of list) { if (seen.has(r.empId)) { dup++; continue; } seen.add(r.empId); merged.push(r); }
+      ta.value = rosterText(merged);
+      const depts = new Set(list.map((r) => r.dept).filter(Boolean));
+      msg.innerHTML = `<b>${list.length - dup ? list.length - dup + " added" : "No new people"}</b> from ${esc(f.name)}${dup ? ` · ${dup} already listed` : ""}${noId ? ` · ${noId} rows without Emp ID skipped` : ""}${!header ? " · no header row found, used columns A, B, C" : ""} · ${depts.size} department${depts.size === 1 ? "" : "s"}. Total ${merged.length}.`;
+    } catch (er) { msg.textContent = "Couldn't read the file: " + er.message; }
+  };
+}
+
 async function sessionForm(prefill = {}) {
-  let banks = [], sessions = [];
-  try { [banks, sessions] = await Promise.all([adm("GET", "/banks"), adm("GET", "/sessions")]); } catch (e) { return toast(e.message); }
+  let banks = [], sessions = [], dn = { names: [], scoped: false };
+  try { [banks, sessions, dn] = await Promise.all([adm("GET", "/banks"), adm("GET", "/sessions"), getDeptNames()]); } catch (e) { return toast(e.message); }
   const usable = banks.filter((b) => b.approved > 0);
   const copying = Boolean(prefill.copyFromSessionId);
   if (!usable.length && !copying) return toast("Approve some questions in a question bank first");
@@ -679,6 +763,8 @@ async function sessionForm(prefill = {}) {
       <label class="f"><span>Venue</span><input type="text" id="v" value="${esc(prefill.venue || "")}"></label>
       <label class="f"><span>Training date</span><input type="date" id="d" value="${new Date().toISOString().slice(0, 10)}"></label>
       <label class="f"><span>Test type</span><select id="ty"><option value="pre">Pre-training test</option><option value="post">Post-training test</option><option value="standalone">Assessment (on its own)</option></select></label>
+      <label class="f"><span>Department</span><select id="sdp">${deptOptions(dn.names, prefill.dept ?? (dn.scoped ? dn.names[0] : ""), dn.scoped)}</select>
+        <small>${dn.scoped ? "You can create tests for your own department(s)." : "Trainers assigned to this department will see the test."}</small></label>
     </div>
     <label class="f" id="prewrap"><span>Compare with pre-training test</span><select id="pre"><option value="">— none —</option>
       ${sessions.filter((s) => s.stype === "pre").map((s) => `<option value="${s.id}">${esc(s.title)} (${s.code}, ${fmtDate(s.training_date || s.created_at)})</option>`).join("")}</select>
@@ -702,8 +788,10 @@ async function sessionForm(prefill = {}) {
     <label class="f"><span>Expected participants — one per line: Emp ID, Name, Department</span>
       <textarea id="ro" placeholder="E1023, Ravi Kumar, Mechanical&#10;E1077, S. Lakshmi, Quality">${esc(prefill.roster ? rosterText(prefill.roster) : "")}</textarea>
       <small>Names fill in automatically when people enter their Emp ID, and you can see who hasn't taken the test. You can also paste from Excel.</small></label>
+    ${rosterUploadBar()}
     <div class="row" style="justify-content:flex-end"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create session</button></div>
   </form>`, { wide: true });
+  bindRosterUpload(w, "#ro");
   w.querySelector("#ty").value = prefill.stype || "pre";
   if (prefill.preSessionId) w.querySelector("#pre").value = prefill.preSessionId;
   if (prefill.trainingDate) w.querySelector("#d").value = String(prefill.trainingDate).slice(0, 10);
@@ -739,7 +827,7 @@ async function sessionForm(prefill = {}) {
       stype: w.querySelector("#ty").value, preSessionId: w.querySelector("#ty").value === "post" ? w.querySelector("#pre").value || null : null,
       timeLimitMin: +w.querySelector("#tl").value || 0, passMark: +w.querySelector("#pm").value, negativeMark: +w.querySelector("#nm").value,
       shuffle: w.querySelector("#sh").checked, showAnswers: w.querySelector("#sa").checked, questionIds: [...sel], roster: parseRoster(w.querySelector("#ro").value),
-      copyFromSessionId: prefill.copyFromSessionId || null, ...readSchedule(w) };
+      copyFromSessionId: prefill.copyFromSessionId || null, dept: w.querySelector("#sdp").value || null, ...readSchedule(w) };
     try { const s = await adm("POST", "/sessions", body); closeModal(); location.hash = "session-" + s.id; toast(`Session created — code ${s.code}`); }
     catch (er) { toast(er.message); }
   };
@@ -793,13 +881,12 @@ async function viewSession(id) {
   const url = joinUrl(s.code);
   app.innerHTML = `<div class="crumb"><a href="#sessions">Sessions</a></div>
   <div class="pagehead"><div><h1>${esc(s.title)}</h1>
-    <p class="muted" style="margin:0">${STYPE[s.stype]} · ${s.questions.length} questions · ${s.time_limit_min ? s.time_limit_min + " min" : "no time limit"} · pass ${s.pass_mark}%${s.trainer ? " · " + esc(s.trainer) : ""}${s.training_date ? " · " + fmtDate(s.training_date) : ""}</p></div>
+    <p class="muted" style="margin:0">${s.dept ? esc(s.dept) : "Plant-wide"} · ${STYPE[s.stype]} · ${s.questions.length} questions · ${s.time_limit_min ? s.time_limit_min + " min" : "no time limit"} · pass ${s.pass_mark}%${s.trainer ? " · " + esc(s.trainer) : ""}${s.training_date ? " · " + fmtDate(s.training_date) : ""}</p></div>
     <div class="row" id="acts"></div></div>
   <div class="joinline"><span id="stchip"></span><span class="code">${s.code}</span><span class="url">${esc(url)}</span>
     <button class="btn sm" id="copy">Copy link</button><button class="btn sm" id="invite">Share invitation</button><button class="btn sm primary" id="showBoard">Show QR to class</button></div>
   <div class="toolbar" style="margin-top:.8rem">
-    <button class="btn sm" id="pPoster">Print QR poster</button><button class="btn sm" id="pSheet">Print answer sheets</button>
-    <button class="btn sm" id="pPaper">Print question paper</button><button class="btn sm" id="pKey">Print answer key</button>
+    <button class="btn sm" id="pPoster">Print QR poster</button><button class="btn sm" id="pPaper">Print paper test</button><button class="btn sm" id="pKey">Print answer key</button>
     <span class="grow"></span><button class="btn sm" id="xl">Export Excel</button><button class="btn sm" id="cards">Print all result cards</button><button class="btn sm" id="certs">Print all certificates</button>
   </div>
   <div id="statsbox"></div>
@@ -813,12 +900,11 @@ async function viewSession(id) {
   document.getElementById("invite").onclick = () => inviteModal(lastData.session);
   document.getElementById("certs").onclick = () => printCertificates(lastData.attempts.filter((a) => a.submitted_at).sort((a, b) => a.emp_id.localeCompare(b.emp_id)).map((a) => resultOf(lastData.session, a)));
   document.getElementById("pPoster").onclick = async () => openPrint("QR poster", qrPosterHTML(s, await qrDataUrl(url, 600), url));
-  document.getElementById("pSheet").onclick = async () => {
-    const n = Math.max(1, Math.min(200, +prompt("How many answer sheets?", Math.max(s.roster.length, 20)) || 0));
-    if (n) openPrint("Answer sheets", answerSheetHTML(s, await qrDataUrl(url, 300), url, n));
+  document.getElementById("pPaper").onclick = () => paperPrintModal(s, url);
+  document.getElementById("pKey").onclick = () => {
+    const sets = savedSets(s);
+    openPrint("Answer key", (sets.length > 1 ? answerKeyCompactHTML(s, sets) : "") + sets.map((x) => questionPaperHTML(s, true, x, sets.length)).join(""));
   };
-  document.getElementById("pPaper").onclick = () => openPrint("Question paper", questionPaperHTML(s, false));
-  document.getElementById("pKey").onclick = () => openPrint("Answer key", questionPaperHTML(s, true));
   document.getElementById("xl").onclick = () => exportExcel(lastData);
   document.getElementById("cards").onclick = () => {
     const done = lastData.attempts.filter((a) => a.submitted_at);
@@ -850,7 +936,7 @@ function drawHead() {
   acts.querySelector("#mkpost")?.addEventListener("click", () => sessionForm({
     title: s.title.replace(/\s*[-—(]*\s*pre[- ]?(training|test)?\)?\s*$/i, "") + " — post-training", trainer: s.trainer, venue: s.venue, stype: "post", preSessionId: s.id,
     timeLimitMin: s.time_limit_min, passMark: s.pass_mark, copyFromSessionId: s.id, copyTitle: s.title, questionCount: s.questions.length,
-    roster: s.roster, issueCertificates: s.issue_certificates, certValidMonths: s.cert_valid_months }));
+    roster: s.roster, issueCertificates: s.issue_certificates, certValidMonths: s.cert_valid_months, dept: s.dept }));
   acts.querySelector("#mkret")?.addEventListener("click", () => followUpForm(s, A));
   acts.querySelector("#del").onclick = async () => {
     if (!confirm(`Delete this session and all ${A.length} results? This can't be undone.`)) return;
@@ -872,6 +958,41 @@ async function setStatus(status) {
     toast(status === "open" ? "Test is open — participants can start" : `Test closed${r.autoSubmitted ? ` — ${r.autoSubmitted} unfinished attempt${r.autoSubmitted > 1 ? "s" : ""} scored` : ""}`);
     viewSession(lastData.session.id);
   } catch (e) { toast(e.message); }
+}
+
+/* ---------- paper tests in sets ---------- */
+const setsOf = (n) => ["A", "B", "C", "D"].slice(0, Math.min(Math.max(n, 1), 4));
+function savedSets(s) { let n = 1; try { n = +sessionStorage.getItem("teas:sets:" + s.id) || +localStorage.getItem("teas:sets:" + s.id) || 1; } catch {} return setsOf(n); }
+function paperPrintModal(s, url) {
+  const n0 = savedSets(s).length > 1 ? savedSets(s).length : 4;
+  const w = openModal(`<header><h2>Print paper test</h2><button class="btn ghost" data-close aria-label="Close">✕</button></header>
+    <p class="muted" style="margin-top:0">For a class answering on paper. With several <b>sets</b>, everyone gets the same questions in a different order (options shuffled too), so neighbours can't copy. Each answer sheet shows its set, and the app scores it with the right key.</p>
+    <form id="ppf">
+      <label class="f" style="max-width:340px"><span>Paper sets</span><select id="pns">
+        <option value="1">1 set — same order for everyone</option><option value="2">2 sets (A, B)</option><option value="3">3 sets (A, B, C)</option><option value="4">4 sets (A, B, C, D)</option></select></label>
+      <fieldset style="border:0;padding:0;margin:0 0 .8rem"><legend style="font-weight:600;font-size:.9rem;margin-bottom:.3rem">What to print</legend>
+        <label class="check"><input type="radio" name="pw" value="pack" checked> Ready-to-hand-out pack: question paper + answer sheet for each person, sets alternating</label>
+        <label class="check"><input type="radio" name="pw" value="master"> One master copy of each set to photocopy (question paper + answer sheet)</label>
+        <label class="check"><input type="radio" name="pw" value="sheets"> Answer sheets only (question papers already copied)</label></fieldset>
+      <label class="f" style="max-width:240px" id="pnw"><span>Number of people</span><input type="number" id="pnn" min="1" max="300" value="${Math.max(s.roster.length, 20)}"></label>
+      <div class="notice" style="margin-top:0">Hand out in the order printed — A, B, C, D, A, B… — so people sitting side by side get different sets. Keep the <b>answer key</b> (all sets) with the trainer.</div>
+      <div class="row" style="justify-content:flex-end"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Print</button></div></form>`);
+  w.querySelector("#pns").value = String(n0);
+  const sync = () => (w.querySelector("#pnw").hidden = w.querySelector("[name=pw]:checked").value === "master");
+  w.querySelectorAll("[name=pw]").forEach((r) => (r.onchange = sync)); sync();
+  w.querySelector("#ppf").onsubmit = async (e) => {
+    e.preventDefault();
+    const sets = setsOf(+w.querySelector("#pns").value), what = w.querySelector("[name=pw]:checked").value;
+    const n = Math.max(1, Math.min(300, +w.querySelector("#pnn").value || 1));
+    try { sessionStorage.setItem("teas:sets:" + s.id, sets.length); localStorage.setItem("teas:sets:" + s.id, sets.length); } catch {}
+    const qr = await qrDataUrl(url, 300);
+    let html = "";
+    if (what === "master") html = sets.map((x) => questionPaperHTML(s, false, x, sets.length) + answerSheetHTML(s, qr, url, 1, [x])).join("");
+    else if (what === "sheets") html = answerSheetHTML(s, qr, url, n, sets);
+    else html = Array.from({ length: n }, (_, k) => { const x = sets[k % sets.length]; return questionPaperHTML(s, false, x, sets.length) + answerSheetHTML(s, qr, url, 1, [x]); }).join("");
+    closeModal();
+    openPrint(what === "sheets" ? "Answer sheets" : "Paper test", html);
+  };
 }
 
 function followUpForm(s, attempts) {
@@ -911,7 +1032,7 @@ function followUpForm(s, attempts) {
       const r = await adm("POST", "/sessions", { title: w.querySelector("#ft").value, stype: "retention", sourceSessionId: s.id, copyFromSessionId: s.id,
         trainer: s.trainer, venue: s.venue, trainingDate: open.toISOString().slice(0, 10), timeLimitMin: s.time_limit_min, passMark: s.pass_mark,
         shuffle: s.shuffle, showAnswers: s.show_answers, negativeMark: Number(s.negative_mark), roster: people,
-        openAt: open.toISOString(), closeAt: close.toISOString(), issueCertificates: w.querySelector("#fc").checked, certValidMonths: s.cert_valid_months });
+        openAt: open.toISOString(), closeAt: close.toISOString(), issueCertificates: w.querySelector("#fc").checked, certValidMonths: s.cert_valid_months, dept: s.dept });
       closeModal(); location.hash = "session-" + r.id;
       toast("Follow-up scheduled — send the invitation now so people know the date");
       setTimeout(() => inviteModal(r), 600);
@@ -960,7 +1081,7 @@ function tabPeople(box) {
   rows.sort((x, y) => (x.a ? (x.a.submitted_at ? 2 : 1) : 0) - (y.a ? (y.a.submitted_at ? 2 : 1) : 0));
   box.innerHTML = `<div class="panel scroll-x" style="padding:0"><table class="t"><thead><tr><th>Emp ID</th><th>Name</th><th class="hide-sm">Department</th><th>Status</th><th class="hide-sm">Started</th><th class="r">Left the page</th><th></th></tr></thead><tbody>
   ${rows.map((r) => `<tr><td class="num">${esc(r.empId)}</td><td>${esc(r.name)}${r.extra && s.roster.length ? ` <span class="chip warn">not on list</span>` : ""}</td><td class="hide-sm">${esc(r.dept || "")}</td>
-    <td>${state(r.a)}${r.a?.mode === "paper" ? ` <span class="chip">paper</span>` : ""}</td><td class="hide-sm small muted">${r.a ? fmtDateTime(r.a.started_at) : ""}</td>
+    <td>${state(r.a)}${r.a?.mode === "paper" ? ` <span class="chip">paper${r.a.paper_set && r.a.paper_set !== "A" || savedSets(s).length > 1 ? " · set " + (r.a.paper_set || "A") : ""}</span>` : ""}</td><td class="hide-sm small muted">${r.a ? fmtDateTime(r.a.started_at) : ""}</td>
     <td class="r">${r.a && r.a.tab_switches ? `<span class="chip ${r.a.tab_switches >= 3 ? "fail" : ""}">${r.a.tab_switches}×</span>` : ""}</td>
     <td class="r">${r.a ? `<button class="btn sm ghost" data-reset="${r.a.id}" data-emp="${esc(r.empId)}">Reset</button>` : ""}</td></tr>`).join("")}
   </tbody></table></div><p class="small muted" style="margin-top:.6rem">"Left the page" counts how often the person switched away from the test on their phone. Reset deletes their attempt so they can start again — use it if someone's phone died.</p>`;
@@ -978,7 +1099,7 @@ function tabResults(box) {
   box.innerHTML = `<div class="panel scroll-x" style="padding:0"><table class="t"><thead><tr><th class="r">#</th><th>Emp ID</th><th>Name</th><th class="hide-sm">Department</th><th class="r">Score</th><th class="r">%</th><th>Result</th>
     ${topics.length > 1 ? topics.map((t) => `<th class="r hide-sm">${esc(t)}</th>`).join("") : ""}<th></th></tr></thead><tbody>
   ${done.map((a, i) => { const r = resultOf(s, a);
-    return `<tr><td class="r num">${i + 1}</td><td class="num">${esc(a.emp_id)}</td><td>${esc(a.name)}${a.mode === "paper" ? ` <span class="chip">paper</span>` : ""}</td><td class="hide-sm">${esc(a.dept || "")}</td>
+    return `<tr><td class="r num">${i + 1}</td><td class="num">${esc(a.emp_id)}</td><td>${esc(a.name)}${a.mode === "paper" ? ` <span class="chip">paper${a.paper_set && a.paper_set !== "A" ? " · set " + a.paper_set : ""}</span>` : ""}</td><td class="hide-sm">${esc(a.dept || "")}</td>
     <td class="r num">${N(a.score)}/${N(a.max_score)}</td><td class="r num"><b>${N(a.percent)}</b></td><td><span class="chip ${a.passed ? "pass" : "fail"}">${a.passed ? "Passed" : "Not passed"}</span></td>
     ${topics.length > 1 ? r.topics.map((t) => `<td class="r num hide-sm">${t.correct}/${t.total}</td>`).join("") : ""}
     <td class="r" style="white-space:nowrap"><button class="btn sm ghost" data-card="${a.id}">Result card</button>${a.cert_code ? `<button class="btn sm ghost" data-cert="${a.id}">Certificate</button>` : ""}</td></tr>`; }).join("")}
@@ -1093,7 +1214,12 @@ function tabPaper(box) {
   const s = lastData.session;
   const ans = {};
   let unclear = new Set(), queue = [], total = 0, photoUrl = null;
-  box.innerHTML = `<p class="muted">For people who answered on a printed answer sheet. Questions are in the same order as the printed question paper.</p>
+  let set = "A";
+  const nSets = savedSets(s).length;
+  const row = (i) => { const L = paperLayout(s, set)[i]; return { L, q: s.questions[L.q] }; };
+  const grid = () => paperLayout(s, set).map((L, i) => { const q = s.questions[L.q];
+    return `<div class="pr" data-row="${i}"><span class="n">${i + 1}</span>${L.o.map((_, j) => `<button type="button" class="bub" data-q="${i}" data-o="${j}" aria-pressed="false" aria-label="Question ${i + 1} option ${LETTERS[j]}">${LETTERS[j]}</button>`).join("")}${q.qtype === "multi" ? `<span class="small muted">multi</span>` : ""}</div>`; }).join("");
+  box.innerHTML = `<p class="muted">For people who answered on a printed answer sheet. Choose the <b>set</b> printed on the sheet; the rows below follow that set's numbering.</p>
   <div class="toolbar">
     <label class="btn primary" style="cursor:pointer">Read answer sheets from photos
       <input type="file" id="scanIn" accept="image/*" capture="environment" multiple hidden></label>
@@ -1106,7 +1232,10 @@ function tabPaper(box) {
     <div id="scanNote"></div>
     <div class="grid2"><label class="f"><span>Employee ID</span><input type="text" id="pe" required autocomplete="off"></label>
       <label class="f"><span>Name</span><input type="text" id="pn"></label><label class="f"><span>Department</span><input type="text" id="pd"></label></div>
-    <div class="paperq" id="pq">${s.questions.map((q, i) => `<div class="pr" data-row="${i}"><span class="n">${i + 1}</span>${q.options.map((_, j) => `<button type="button" class="bub" data-q="${i}" data-o="${j}" aria-pressed="false" aria-label="Question ${i + 1} option ${LETTERS[j]}">${LETTERS[j]}</button>`).join("")}${q.qtype === "multi" ? `<span class="small muted">multi</span>` : ""}</div>`).join("")}</div>
+    <div class="row" style="margin-bottom:.6rem"><span style="font-weight:600;font-size:.9rem">Paper set</span>
+      <div class="seg" role="group" aria-label="Paper set">${["A", "B", "C", "D"].map((x) => `<button type="button" data-set="${x}" aria-pressed="${x === "A"}">${x}</button>`).join("")}</div>
+      <span class="small muted">${nSets > 1 ? `${nSets} sets printed for this test` : "Set A = the normal order"}</span></div>
+    <div class="paperq" id="pq">${grid()}</div>
     <label class="check" style="margin-top:.8rem"><input type="checkbox" id="pov"> Replace an existing entry for this Employee ID</label>
     <div class="row" style="justify-content:flex-end;margin-top:.6rem"><span id="pres" class="grow"></span><button type="button" class="btn" id="pclr">Clear</button><button class="btn primary" id="psave">Save and score</button></div>
   </form></div>`;
@@ -1118,11 +1247,22 @@ function tabPaper(box) {
     box.querySelectorAll(".bub").forEach((x) => x.setAttribute("aria-pressed", (ans[x.dataset.q] || []).includes(+x.dataset.o)));
     box.querySelectorAll(".pr").forEach((r) => (r.style.outline = unclear.has(+r.dataset.row) ? "2px solid var(--warn)" : "", r.style.borderRadius = "6px"));
   };
-  box.querySelectorAll(".bub").forEach((b) => (b.onclick = () => {
-    const i = +b.dataset.q, j = +b.dataset.o, multi = s.questions[i].qtype === "multi";
+  const bindBubs = () => box.querySelectorAll(".bub").forEach((b) => (b.onclick = () => {
+    const i = +b.dataset.q, j = +b.dataset.o, multi = row(i).q.qtype === "multi";
     let cur = ans[i] || [];
     cur = multi ? (cur.includes(j) ? cur.filter((x) => x !== j) : [...cur, j]) : cur[0] === j ? [] : [j];
     ans[i] = cur; unclear.delete(i); paint();
+  }));
+  bindBubs();
+  const setSet = (x, keep) => {
+    set = x;
+    box.querySelectorAll("[data-set]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.set === x));
+    if (!keep) { Object.keys(ans).forEach((k) => delete ans[k]); unclear = new Set(); }
+    $("#pq").innerHTML = grid(); bindBubs(); paint();
+  };
+  box.querySelectorAll("[data-set]").forEach((b) => (b.onclick = () => {
+    if (Object.keys(ans).length && !confirm("Changing the set clears the marks entered. Continue?")) return;
+    setSet(b.dataset.set);
   }));
   const clear = (keepPhoto) => {
     Object.keys(ans).forEach((k) => delete ans[k]); unclear = new Set();
@@ -1145,6 +1285,7 @@ function tabPaper(box) {
       const data = await imageFileToJpeg(file, 1800);
       const r = await adm("POST", `/sessions/${s.id}/scan`, { image: { mime: "image/jpeg", data } });
       pe.value = r.empId; $("#pn").value = r.name; $("#pd").value = r.dept;
+      setSet(r.set || "A");
       Object.entries(r.answers).forEach(([k, v]) => (ans[k] = v));
       unclear = new Set(r.unclear); paint();
       const blank = s.questions.length - Object.keys(r.answers).length;
@@ -1152,6 +1293,7 @@ function tabPaper(box) {
         Photo ${n} of ${total}. Compare with the photo, fix anything wrong, then save.
         ${unclear.size ? `<br><b>${unclear.size} row${unclear.size > 1 ? "s need" : " needs"} checking</b> (outlined).` : ""}
         ${blank ? `<br>${blank} row${blank > 1 ? "s" : ""} left blank on the sheet.` : ""}
+        ${nSets > 1 && !r.setRead ? "<br><b>Set not read from the sheet</b> — choose the set above before saving." : r.setRead ? `<br>Set <b>${esc(r.set)}</b> read from the sheet.` : ""}
         ${!r.empId ? "<br><b>Employee ID couldn't be read</b> — type it in." : !r.inRoster && s.roster.length ? "<br>This Employee ID is not on the participant list — check it." : ""}
         ${r.existing ? `<br><b>${esc(r.empId)} already has a ${r.existing} entry.</b> Tick "Replace existing" to overwrite it.` : ""}</div>`;
       $("#scanStat").textContent = `Photo ${n} of ${total}`;
@@ -1166,12 +1308,12 @@ function tabPaper(box) {
   $("#pf").onsubmit = async (e) => {
     e.preventDefault();
     try {
-      const r = await adm("POST", `/sessions/${s.id}/paper`, { empId: pe.value, name: $("#pn").value, dept: $("#pd").value, answers: ans, overwrite: $("#pov").checked,
+      const r = await adm("POST", `/sessions/${s.id}/paper`, { empId: pe.value, name: $("#pn").value, dept: $("#pd").value, answers: ans, set, overwrite: $("#pov").checked,
         scanFlags: $("#photoBox").hidden ? null : [...unclear] });
       $("#pres").innerHTML = `<span class="chip ${r.result.passed ? "pass" : "fail"}">${esc(r.result.empId)}: ${r.result.percent}%</span>`;
       toast(`Saved ${r.result.empId} — ${r.result.percent}%`);
       lastData = await adm("GET", "/sessions/" + s.id); drawHead();
-      if (!$("#photoBox").hidden) next(); else clear(false);
+      if (!$("#photoBox").hidden) next(); else { clear(false); }
     } catch (er) { toast(er.message); }
   };
 }
@@ -1185,18 +1327,22 @@ function tabEdit(box) {
       <label class="f"><span>Training date</span><input type="date" id="ed" value="${s.training_date ? String(s.training_date).slice(0, 10) : ""}"></label>
       <label class="f"><span>Time limit (minutes)</span><input type="number" id="etl" min="0" value="${s.time_limit_min}"></label>
       <label class="f"><span>Pass mark (%)</span><input type="number" id="epm" min="0" max="100" value="${s.pass_mark}"><small>Changing it affects new submissions only.</small></label></div>
+    <label class="f" style="max-width:360px"><span>Department</span><select id="edp"><option>Loading…</option></select></label>
     <label class="check"><input type="checkbox" id="esa" ${s.show_answers ? "checked" : ""}> Show correct answers to participants after they submit</label>
     ${scheduleFields({ open: Boolean(s.open_at || s.close_at), openAt: s.open_at, closeAt: s.close_at, issueCertificates: s.issue_certificates, certValidMonths: s.cert_valid_months })}
     <p class="small muted" style="margin-top:-.4rem">Turning certificates on later doesn't create them for people who already submitted.</p>
     <label class="f" style="margin-top:.8rem"><span>Expected participants — Emp ID, Name, Department</span><textarea id="ero" style="min-height:140px">${esc(rosterText(s.roster))}</textarea></label>
+    ${rosterUploadBar()}
     <p class="small muted">Questions can't be changed once a session exists, so results stay comparable. Create a new session for a different question set.</p>
     <button class="btn primary">Save settings</button></form>`;
+  bindRosterUpload(box, "#ero");
+  getDeptNames().then((dn) => { const el = box.querySelector("#edp"); if (el) el.innerHTML = deptOptions(dn.names, s.dept, dn.scoped); }).catch(() => {});
   box.querySelector("#ef").onsubmit = async (e) => {
     e.preventDefault();
     try {
       await adm("PUT", "/sessions/" + s.id, { title: box.querySelector("#et").value, trainer: box.querySelector("#etr").value, venue: box.querySelector("#ev").value,
         trainingDate: box.querySelector("#ed").value || null, timeLimitMin: +box.querySelector("#etl").value || 0, passMark: +box.querySelector("#epm").value,
-        showAnswers: box.querySelector("#esa").checked, roster: parseRoster(box.querySelector("#ero").value), ...readSchedule(box) });
+        showAnswers: box.querySelector("#esa").checked, roster: parseRoster(box.querySelector("#ero").value), dept: box.querySelector("#edp").value || null, ...readSchedule(box) });
       toast("Settings saved"); viewSession(s.id);
     } catch (er) { toast(er.message); }
   };
@@ -1208,7 +1354,7 @@ async function exportExcel(d) {
   const s = d.session, done = d.attempts.filter((a) => a.submitted_at).sort((a, b) => N(b.percent) - N(a.percent));
   const topics = [...new Set(s.questions.map((q) => q.topic || "General"))];
   const res = [["Rank", "Emp ID", "Name", "Department", "Mode", "Score", "Out of", "Percent", "Result", ...topics.map((t) => `${t} (correct)`), "Left page (times)", "Submitted", "Certificate no.", "Valid until"]];
-  done.forEach((a, i) => { const r = resultOf(s, a); res.push([i + 1, a.emp_id, a.name, a.dept || "", a.mode, N(a.score), N(a.max_score), N(a.percent), a.passed ? "Passed" : "Not passed", ...r.topics.map((t) => `${t.correct}/${t.total}`), a.tab_switches, a.submitted_at ? new Date(a.submitted_at).toLocaleString("en-IN") : "", r.certCode || "", r.validUntil ? fmtDate(r.validUntil) : ""]); });
+  done.forEach((a, i) => { const r = resultOf(s, a); res.push([i + 1, a.emp_id, a.name, a.dept || "", a.mode === "paper" ? `paper (set ${a.paper_set || "A"})` : a.mode, N(a.score), N(a.max_score), N(a.percent), a.passed ? "Passed" : "Not passed", ...r.topics.map((t) => `${t.correct}/${t.total}`), a.tab_switches, a.submitted_at ? new Date(a.submitted_at).toLocaleString("en-IN") : "", r.certCode || "", r.validUntil ? fmtDate(r.validUntil) : ""]); });
   const notTaken = s.roster.filter((r) => !d.attempts.some((a) => a.emp_id === r.empId));
   notTaken.forEach((r) => res.push(["", r.empId, r.name, r.dept, "Not taken"]));
   const mat = [["Emp ID", "Name", ...s.questions.map((_, i) => `Q${i + 1}`)], ["KEY", "", ...s.questions.map((q) => q.answer.map((j) => LETTERS[j]).join(""))]];
@@ -1269,7 +1415,9 @@ async function viewSettings() {
   app.innerHTML = `<h1>Settings</h1>
   <div class="panel" style="max-width:860px;margin-bottom:1rem"><h3>Signed in as</h3>
     <p style="margin:0"><b>${esc(me.name)}</b> · ${{ admin: "Administrator", trainer: "Trainer", hod: "Head of department" }[me.role]}${me.depts?.length ? " · " + me.depts.map(esc).join(", ") : ""}</p></div>
-  ${me.role === "admin" ? `<div class="panel" style="max-width:860px;margin-bottom:1rem" id="users"><span class="spinner"></span></div>` : ""}
+  ${me.role === "admin" ? `<div class="panel" style="max-width:960px;margin-bottom:1rem" id="depts"><span class="spinner"></span></div>
+  <div class="panel" style="max-width:960px;margin-bottom:1rem" id="users"><span class="spinner"></span></div>` : ""}
+  ${isHod ? "" : `<div class="panel" style="max-width:860px;margin-bottom:1rem" id="data"><span class="spinner"></span></div>`}
   ${isHod ? "" : `<div class="panel" style="max-width:860px;margin-bottom:1rem" id="ai"><span class="spinner"></span></div>`}
   <div class="panel" style="max-width:860px;margin-bottom:1rem"><h3>Appearance</h3>
     <div class="seg" role="group" aria-label="Theme">${["auto", "light", "dark"].map((t) => `<button data-th="${t}" aria-pressed="${(localStorage.getItem("teas:theme") || "auto") === t}">${t === "auto" ? "Match device" : t === "light" ? "Light" : "Dark"}</button>`).join("")}</div></div>
@@ -1284,8 +1432,9 @@ async function viewSettings() {
     try { b.dataset.th === "auto" ? localStorage.removeItem("teas:theme") : localStorage.setItem("teas:theme", b.dataset.th); } catch {}
     applyTheme(b.dataset.th); app.querySelectorAll("[data-th]").forEach((x) => x.setAttribute("aria-pressed", x === b));
   }));
-  if (me.role === "admin") drawUsers();
+  if (me.role === "admin") { drawDepts(); drawUsers(); }
   if (isHod) return;
+  drawData();
   try {
     const a = await adm("GET", "/ai-status");
     document.getElementById("ai").innerHTML = `<h3>AI for reading documents and answer sheets</h3>
@@ -1294,15 +1443,83 @@ async function viewSettings() {
   } catch (e) { document.getElementById("ai").innerHTML = `<div class="notice err">${esc(e.message)}</div>`; }
 }
 
+/* ---------- MR: departments and trainers ---------- */
+async function drawDepts() {
+  const box = document.getElementById("depts"); if (!box) return;
+  let r;
+  try { r = await adm("GET", "/departments"); } catch (e) { return (box.innerHTML = `<div class="notice err">${esc(e.message)}</div>`); }
+  const deps = r.departments;
+  const plantWide = r.trainers.filter((t) => t.active && !(t.depts || []).length);
+  box.innerHTML = `<div class="row" style="justify-content:space-between;margin-bottom:.6rem"><h3 style="margin:0">Departments and trainers</h3><button class="btn sm primary" id="adddep">Add department</button></div>
+    <p class="small muted">Give each department its own trainers (up to the limit you set, normally 5). A trainer sees only the tests, question banks and results of their department(s) and can run tests only for them. Trainers without a department are plant-wide and see everything.</p>
+    ${deps.length ? `<div class="scroll-x"><table class="t"><thead><tr><th>Department</th><th>Trainers</th><th>HOD</th><th class="r">Tests</th><th class="r">Results</th><th class="hide-sm">Last test</th><th></th></tr></thead><tbody>
+    ${deps.map((d) => { const n = d.trainers.filter((t) => t.active).length;
+      return `<tr${d.active ? "" : ' style="opacity:.55"'}><td><b>${esc(d.name)}</b>${d.active ? "" : ` <span class="chip">inactive</span>`}</td>
+      <td><span class="chip ${n === 0 ? "warn" : n >= d.max_trainers ? "pass" : ""}">${n} / ${d.max_trainers}</span> ${d.trainers.map((t) => `<span class="small">${esc(t.name)}${t.active ? "" : " (off)"}</span>`).join(", ")}</td>
+      <td class="small">${d.hods.map((h) => esc(h.name)).join(", ") || `<span class="muted">—</span>`}</td>
+      <td class="r num">${d.sessions}</td><td class="r num">${d.results}</td><td class="hide-sm small muted">${d.lastSession ? fmtDate(d.lastSession) : "—"}</td>
+      <td class="r" style="white-space:nowrap"><button class="btn sm" data-assign="${d.id}">Trainers</button><button class="btn sm ghost" data-dedit="${d.id}">Edit</button></td></tr>`; }).join("")}
+    </tbody></table></div>` : `<p class="muted">No departments yet. Add them here — or they are added automatically when you give an HOD or trainer a department.</p>`}
+    ${plantWide.length ? `<p class="small" style="margin:.6rem 0 0">Plant-wide trainers (see all departments): ${plantWide.map((t) => esc(t.name)).join(", ")}</p>` : ""}`;
+  box.querySelector("#adddep").onclick = () => deptForm();
+  box.querySelectorAll("[data-dedit]").forEach((b) => (b.onclick = () => deptForm(deps.find((d) => d.id === +b.dataset.dedit))));
+  box.querySelectorAll("[data-assign]").forEach((b) => (b.onclick = () => assignForm(deps.find((d) => d.id === +b.dataset.assign), r.trainers)));
+}
+
+function deptForm(d) {
+  const w = openModal(`<header><h2>${d ? esc(d.name) : "Add department"}</h2><button class="btn ghost" data-close aria-label="Close">✕</button></header>
+  <form id="df">
+    ${d ? "" : `<label class="f"><span>Department name</span><input type="text" id="dn" required placeholder="Mechanical"><small>Use the same spelling as in participant lists.</small></label>`}
+    <label class="f" style="max-width:240px"><span>Most trainers allowed</span><input type="number" id="dmx" min="1" max="20" value="${d ? d.max_trainers : 5}"></label>
+    ${d ? `<label class="check"><input type="checkbox" id="dac" ${d.active ? "checked" : ""}> Active (shown in department lists)</label>` : ""}
+    <div class="row" style="justify-content:space-between;margin-top:.8rem">${d ? `<button type="button" class="btn danger" id="ddel">Remove</button>` : "<span></span>"}
+      <div class="row"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">${d ? "Save" : "Add"}</button></div></div></form>`);
+  w.querySelector("#df").onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      if (d) await adm("PUT", "/departments/" + d.id, { maxTrainers: +w.querySelector("#dmx").value, active: w.querySelector("#dac").checked });
+      else await adm("POST", "/departments", { name: w.querySelector("#dn").value, maxTrainers: +w.querySelector("#dmx").value });
+      closeModal(); drawDepts();
+    } catch (er) { toast(er.message); }
+  };
+  if (d) w.querySelector("#ddel").onclick = async () => {
+    if (!confirm(`Remove ${d.name} from the list? Past results keep the department name.`)) return;
+    try { await adm("DELETE", "/departments/" + d.id); closeModal(); drawDepts(); } catch (er) { toast(er.message); }
+  };
+}
+
+function assignForm(d, trainers) {
+  const sel = new Set(d.trainers.map((t) => t.id));
+  const w = openModal(`<header><h2>Trainers for ${esc(d.name)}</h2><button class="btn ghost" data-close aria-label="Close">✕</button></header>
+    <p class="muted" style="margin-top:0">Tick up to <b>${d.max_trainers}</b>. A trainer can belong to several departments. To add someone new, first use <b>Add person</b> in "Trainers and HODs".</p>
+    <div class="picker" id="tp">${trainers.length ? trainers.map((t) => { const other = (t.depts || []).filter((x) => x.toLowerCase() !== d.name.toLowerCase());
+      return `<label><input type="checkbox" value="${t.id}" ${sel.has(t.id) ? "checked" : ""} ${t.active ? "" : "disabled"}><span><b>${esc(t.name)}</b>${t.active ? "" : " (can't sign in)"}
+        ${other.length ? `<span class="small muted"> · also ${other.map(esc).join(", ")}</span>` : !(t.depts || []).length ? `<span class="small muted"> · currently plant-wide</span>` : ""}</span></label>`; }).join("") : `<p class="muted">No trainers yet.</p>`}</div>
+    <p class="small" id="tc"></p>
+    <div class="row" style="justify-content:flex-end"><button class="btn" data-close>Cancel</button><button class="btn primary" id="tsave">Save</button></div>`);
+  const sync = () => {
+    w.querySelectorAll("#tp input").forEach((c) => (c.checked ? sel.add(+c.value) : sel.delete(+c.value)));
+    const n = sel.size;
+    w.querySelector("#tc").innerHTML = `<b>${n} of ${d.max_trainers}</b> selected${n >= d.max_trainers ? " — limit reached" : ""}`;
+    w.querySelectorAll("#tp input").forEach((c) => { if (!c.checked) c.disabled = n >= d.max_trainers || !trainers.find((t) => t.id === +c.value).active; });
+  };
+  w.querySelectorAll("#tp input").forEach((c) => (c.onchange = sync)); sync();
+  w.querySelector("#tsave").onclick = async () => {
+    try { await adm("PUT", `/departments/${d.id}/trainers`, { userIds: [...sel] }); closeModal(); toast(`Trainers for ${d.name} saved`); drawDepts(); drawUsers(); }
+    catch (er) { toast(er.message); }
+  };
+}
+
 async function drawUsers() {
   const box = document.getElementById("users");
   let users;
   try { users = await adm("GET", "/users"); } catch (e) { return (box.innerHTML = `<div class="notice err">${esc(e.message)}</div>`); }
   box.innerHTML = `<div class="row" style="justify-content:space-between;margin-bottom:.6rem"><h3 style="margin:0">Trainers and HODs</h3><button class="btn sm primary" id="adduser">Add person</button></div>
-    <p class="small muted">Each person signs in with their own key. Trainers can do everything except manage people. HODs only see the Departments view for their own departments. You sign in with the master key (TRAINER_KEY).</p>
-    ${users.length ? `<div class="scroll-x"><table class="t"><thead><tr><th>Name</th><th>Role</th><th>Departments</th><th class="hide-sm">Last sign-in</th><th></th></tr></thead><tbody>
+    <p class="small muted">Each person signs in with their own key. Trainers run tests for their department(s); a trainer with no department is plant-wide. HODs only see the Departments view for their own departments. You sign in with the master key (TRAINER_KEY).</p>
+    ${users.length ? `<div class="scroll-x"><table class="t"><thead><tr><th>Name</th><th>Role</th><th>Departments</th><th class="r">Tests run</th><th class="hide-sm">Last sign-in</th><th></th></tr></thead><tbody>
     ${users.map((u) => `<tr${u.active ? "" : ' style="opacity:.55"'}><td><b>${esc(u.name)}</b>${u.active ? "" : ` <span class="chip">disabled</span>`}<div class="small muted">key …${esc(u.key_hint || "")}</div></td>
-      <td>${u.role === "hod" ? "HOD" : "Trainer"}</td><td>${u.depts.map(esc).join(", ") || "—"}</td><td class="hide-sm small muted">${u.last_login_at ? fmtDateTime(u.last_login_at) : "never"}</td>
+      <td>${u.role === "hod" ? "HOD" : "Trainer"}</td><td>${u.depts.map(esc).join(", ") || (u.role === "trainer" ? `<span class="small muted">Plant-wide</span>` : "—")}</td>
+      <td class="r num">${u.role === "trainer" ? u.sessions_run : ""}${u.role === "trainer" && u.last_session ? `<div class="small muted">last ${fmtDate(u.last_session)}</div>` : ""}</td><td class="hide-sm small muted">${u.last_login_at ? fmtDateTime(u.last_login_at) : "never"}</td>
       <td class="r" style="white-space:nowrap"><button class="btn sm ghost" data-ue="${u.id}">Edit</button><button class="btn sm ghost" data-uk="${u.id}">New key</button></td></tr>`).join("")}
     </tbody></table></div>` : `<p class="muted" style="margin:0">No one added yet.</p>`}`;
   box.querySelector("#adduser").onclick = () => userForm();
@@ -1319,22 +1536,38 @@ function userForm(u) {
   <form id="uf">
     <label class="f"><span>Name</span><input type="text" id="un" required value="${esc(u?.name || "")}"></label>
     <label class="f"><span>Role</span><select id="ur"><option value="trainer">Trainer — runs tests, builds question banks</option><option value="hod">HOD — sees their department's results only</option></select></label>
-    <label class="f" id="udw"><span>Departments</span><input type="text" id="ud" value="${esc((u?.depts || []).join(", "))}" placeholder="Mechanical, Electrical">
-      <small>Separate with commas. Must match the department written on participant lists (capital letters don't matter).</small></label>
+    <div class="f" id="udw"><span style="display:block;font-weight:600;font-size:.9rem;margin-bottom:.3rem" id="udl">Departments</span>
+      <div class="picker" id="udc" style="max-height:200px"><span class="spinner"></span></div>
+      <input type="text" id="ud" placeholder="Another department not in the list (optional)" style="margin-top:.5rem">
+      <small id="udh" style="display:block;color:var(--muted);font-size:.8rem;margin-top:.25rem"></small></div>
     ${u ? `<label class="check"><input type="checkbox" id="ua" ${u.active ? "checked" : ""}> Can sign in</label>` : ""}
     <div class="row" style="justify-content:space-between;margin-top:.8rem">${u ? `<button type="button" class="btn danger" id="udel">Remove</button>` : "<span></span>"}
       <div class="row"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">${u ? "Save" : "Add and show key"}</button></div></div>
   </form>`);
   w.querySelector("#ur").value = u?.role || "trainer";
-  const sync = () => (w.querySelector("#udw").hidden = w.querySelector("#ur").value !== "hod");
+  const mine = new Set((u?.depts || []).map((x) => x.toLowerCase()));
+  adm("GET", "/departments").then((r) => {
+    const names = [...new Set([...r.departments.filter((d) => d.active || mine.has(d.name.toLowerCase())).map((d) => d.name), ...(u?.depts || [])])];
+    const full = Object.fromEntries(r.departments.map((d) => [d.name.toLowerCase(), d]));
+    w.querySelector("#udc").innerHTML = names.length ? names.map((n) => { const d = full[n.toLowerCase()]; const cnt = d ? d.trainers.filter((t) => t.active && t.id !== u?.id).length : 0;
+      return `<label><input type="checkbox" value="${esc(n)}" ${mine.has(n.toLowerCase()) ? "checked" : ""}><span>${esc(n)}${d ? ` <span class="small muted">· trainers ${cnt}/${d.max_trainers}</span>` : ""}</span></label>`; }).join("")
+      : `<p class="muted small" style="margin:.4rem 0">No departments yet — type one below.</p>`;
+  }).catch(() => (w.querySelector("#udc").innerHTML = ""));
+  const sync = () => {
+    const hod = w.querySelector("#ur").value === "hod";
+    w.querySelector("#udl").textContent = hod ? "Departments (at least one)" : "Departments (optional)";
+    w.querySelector("#udh").textContent = hod ? "The HOD sees results only for these departments." : "Leave all unticked for a plant-wide trainer who sees every department.";
+  };
   w.querySelector("#ur").onchange = sync; sync();
   w.querySelector("#uf").onsubmit = async (e) => {
     e.preventDefault();
-    const body = { name: w.querySelector("#un").value, role: w.querySelector("#ur").value, depts: w.querySelector("#ur").value === "hod" ? w.querySelector("#ud").value : [] };
+    const ticked = [...w.querySelectorAll("#udc input:checked")].map((c) => c.value);
+    const extra = w.querySelector("#ud").value.split(/[,;]/).map((x) => x.trim()).filter(Boolean);
+    const body = { name: w.querySelector("#un").value, role: w.querySelector("#ur").value, depts: [...ticked, ...extra] };
     if (u) body.active = w.querySelector("#ua").checked;
     try {
       const r = u ? await adm("PUT", "/users/" + u.id, body) : await adm("POST", "/users", body);
-      closeModal(); drawUsers();
+      closeModal(); drawUsers(); drawDepts();
       if (r.key) showKey(r.name, r.key);
     } catch (er) { toast(er.message); }
   };
@@ -1351,6 +1584,209 @@ function showKey(name, key) {
     <div class="notice"><b>This is the only time the key is shown.</b> If it's lost, use "New key".</div>
     <div class="row" style="justify-content:flex-end"><button class="btn primary" data-close>Done</button></div>`);
   w.querySelector("#kc").onclick = async () => { try { await navigator.clipboard.writeText(key); toast("Key copied"); } catch { toast(key); } };
+}
+
+/* ================================================================ */
+/* data: storage, backup, restore, training register               */
+/* ================================================================ */
+const fmtBytes = (b) => (b == null ? "—" : b < 1048576 ? (b / 1024).toFixed(0) + " KB" : (b / 1048576).toFixed(1) + " MB");
+async function drawData() {
+  const box = document.getElementById("data"); if (!box) return;
+  let st = null;
+  try { st = await adm("GET", "/storage"); } catch {}
+  let last = null; try { last = localStorage.getItem("teas:lastBackup"); } catch {}
+  const isAdmin = me.role === "admin";
+  const days = last ? Math.floor((Date.now() - new Date(last).getTime()) / 86400000) : null;
+  box.innerHTML = `<h3>Data and backup</h3>
+    <p class="small muted" style="margin-top:0">Results stay in the database with no expiry date until someone deletes them. The Free Netlify plan allows up to 5 GB per database — roughly 2 KB per test result, so about two million results.</p>
+    ${st ? `<div class="stats" style="margin-bottom:.8rem">
+      <div class="stat"><b>${st.sessions}</b><span>sessions</span></div>
+      <div class="stat"><b>${st.attempts}</b><span>test results</span></div>
+      <div class="stat"><b>${st.certificates}</b><span>certificates</span></div>
+      <div class="stat"><b>${st.questions}</b><span>questions in ${st.banks} bank${st.banks === 1 ? "" : "s"}</span></div>
+      <div class="stat"><b>${fmtBytes(st.bytes)}</b><span>database size${st.bytes ? ` · ${(st.bytes / (5 * 1073741824) * 100).toFixed(2)}% of 5 GB` : ""}</span></div></div>` : ""}
+    ${isAdmin ? `<div class="notice ${days === null || days > 30 ? "" : "ok"}" style="margin-top:0">${last ? `Last full backup from this computer: <b>${fmtDate(last)}</b> (${days} day${days === 1 ? "" : "s"} ago).` : "No full backup downloaded from this computer yet."} Download one every month and keep it on the company drive.</div>` : ""}
+    <div class="row">
+      <button class="btn" id="reg">Download training register (Excel)</button>
+      ${isAdmin ? `<button class="btn primary" id="bk">Download full backup</button><label class="btn" style="cursor:pointer">Restore from backup<input type="file" id="rs" accept=".json" hidden></label>` : ""}
+    </div><div class="small" id="dmsg" style="margin-top:.6rem"></div>
+    <p class="small muted" style="margin-bottom:0">The <b>training register</b> lists every result ever recorded — one row per person per test — for IMS records. The <b>full backup</b> holds everything (question banks, sessions, answers, certificates, people) and can rebuild the app on a new site. Restore only works into an empty, newly set-up app.</p>`;
+  box.querySelector("#reg").onclick = () => downloadRegister(box.querySelector("#dmsg"));
+  if (!isAdmin) return;
+  box.querySelector("#bk").onclick = () => downloadBackup(box.querySelector("#dmsg"));
+  box.querySelector("#rs").onchange = (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) restoreBackup(f, box.querySelector("#dmsg")); };
+}
+
+async function fetchAll(path, onPage) {
+  let after = 0, all = [];
+  for (;;) {
+    const r = await adm("GET", `${path}${path.includes("?") ? "&" : "?"}after=${after}`);
+    all = all.concat(r.rows); onPage?.(all.length);
+    if (!r.more || !r.rows.length) return all;
+    after = r.rows[r.rows.length - 1].id;
+  }
+}
+
+async function downloadRegister(msg) {
+  msg.innerHTML = `<span class="spinner"></span> Collecting results…`;
+  try {
+    const rows = await fetchAll("/register", (n) => (msg.innerHTML = `<span class="spinner"></span> ${n} results…`));
+    if (!rows.length) { msg.textContent = "No results yet."; return; }
+    await loadScript(LIB.xlsx);
+    const validUntil = (r) => { if (!r.cert_code || !r.cert_valid_months) return ""; const d = new Date(r.submitted_at); d.setMonth(d.getMonth() + r.cert_valid_months); return fmtDate(d); };
+    const reg = [["Emp ID", "Name", "Department", "Training", "Type", "Session code", "Training date", "Trainer", "Venue", "Mode", "Score %", "Pass mark %", "Result", "Certificate no.", "Valid until", "Submitted"]];
+    rows.sort((a, b) => new Date(b.submitted_at) - new Date(a.submitted_at)).forEach((r) => reg.push([r.emp_id, r.name, r.dept || "", r.title, STYPE[r.stype], r.code,
+      r.training_date ? fmtDate(r.training_date) : "", r.trainer || "", r.venue || "", r.mode, r.percent, r.pass_mark, r.passed ? "Passed" : "Not passed",
+      r.cert_code || "", validUntil(r), new Date(r.submitted_at).toLocaleString("en-IN")]));
+    const byDept = {};
+    rows.filter((r) => r.stype !== "pre").forEach((r) => { const d = r.dept || "(none)"; byDept[d] ??= { n: 0, p: 0, sum: 0, people: new Set() }; byDept[d].n++; byDept[d].sum += r.percent; if (r.passed) byDept[d].p++; byDept[d].people.add(r.emp_id); });
+    const sum = [["Department", "People tested", "Tests (excl. pre-tests)", "Passed", "Pass rate %", "Average %"]];
+    Object.entries(byDept).sort().forEach(([d, v]) => sum.push([d, v.people.size, v.n, v.p, Math.round((v.p / v.n) * 1000) / 10, Math.round((v.sum / v.n) * 10) / 10]));
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet(reg); ws["!cols"] = reg[0].map((h) => ({ wch: /Training|Name/.test(h) ? 30 : 14 })); ws["!autofilter"] = { ref: `A1:P${reg.length}` };
+    XLSX.utils.book_append_sheet(wb, ws, "Register");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(sum), "By department");
+    XLSX.writeFile(wb, `Training_Register_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    msg.textContent = `Training register downloaded — ${rows.length} results.`;
+  } catch (e) { msg.innerHTML = `<span style="color:var(--fail)">${esc(e.message)}</span>`; }
+}
+
+const BACKUP_TABLES = ["departments", "app_users", "banks", "questions", "sessions", "attempts"];
+async function downloadBackup(msg) {
+  try {
+    const data = { app: "VGU Training Assessment", version: 2, exportedAt: new Date().toISOString(), site: location.origin, tables: {} };
+    for (const t of BACKUP_TABLES) {
+      msg.innerHTML = `<span class="spinner"></span> Backing up ${t.replace("app_users", "people")}…`;
+      data.tables[t] = await fetchAll(`/backup/${t}`, (n) => (msg.innerHTML = `<span class="spinner"></span> Backing up ${t.replace("app_users", "people")}: ${n}`));
+    }
+    const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = `TEAS_backup_${new Date().toISOString().slice(0, 10)}.json`; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    try { localStorage.setItem("teas:lastBackup", new Date().toISOString()); } catch {}
+    const counts = BACKUP_TABLES.map((t) => `${data.tables[t].length} ${t.replace("app_users", "people")}`).join(", ");
+    msg.textContent = `Backup downloaded (${fmtBytes(blob.size)}): ${counts}. Keep it on the company drive.`;
+    setTimeout(drawData, 1500);
+  } catch (e) { msg.innerHTML = `<span style="color:var(--fail)">Backup failed: ${esc(e.message)}</span>`; }
+}
+
+async function restoreBackup(file, msg) {
+  let data;
+  try { data = JSON.parse(await file.text()); } catch { msg.innerHTML = `<span style="color:var(--fail)">This is not a backup file.</span>`; return; }
+  if (!data.tables || !Array.isArray(data.tables.sessions)) { msg.innerHTML = `<span style="color:var(--fail)">This is not a Training Assessment backup.</span>`; return; }
+  const chk = await adm("POST", "/restore/check");
+  if (!chk.empty) { msg.innerHTML = `<span style="color:var(--fail)">Restore only works into an empty app — this one already has question banks or sessions.</span>`; return; }
+  if (!confirm(`Restore the backup from ${fmtDate(data.exportedAt)}? It adds ${data.tables.sessions.length} sessions and ${(data.tables.attempts || []).length} results.`)) return;
+  try {
+    for (const t of BACKUP_TABLES) {
+      const rows = data.tables[t] || [];
+      const size = t === "sessions" ? 50 : 500;
+      for (let i = 0; i < rows.length; i += size) {
+        msg.innerHTML = `<span class="spinner"></span> Restoring ${t.replace("app_users", "people")}: ${Math.min(i + size, rows.length)} of ${rows.length}`;
+        await adm("POST", `/restore/${t}`, { rows: rows.slice(i, i + size) });
+      }
+    }
+    await adm("POST", "/restore/finish");
+    msg.textContent = "Restore complete.";
+    setTimeout(drawData, 800);
+  } catch (e) { msg.innerHTML = `<span style="color:var(--fail)">Restore stopped: ${esc(e.message)}</span>`; }
+}
+
+/* ================================================================ */
+/* help                                                             */
+/* ================================================================ */
+const HELP = [
+  { id: "start", t: "Quick start", roles: "admin trainer", b: `
+    <ol><li><b>Question banks → New question bank</b>, then <b>Add from documents</b> (PDF, Word, PowerPoint, Excel or photos).</li>
+    <li>Check every draft question against the source and <b>Approve</b> it.</li>
+    <li><b>Sessions → New session</b> → Pre-training test → pick questions → add participants (paste or <b>Upload Excel / CSV</b>) → <b>Create session</b>.</li>
+    <li><b>Open test</b> → <b>Show QR to class</b>. People scan with their phone camera.</li>
+    <li><b>Close test</b> when done. After the training press <b>Create post-test</b> and repeat.</li>
+    <li>Print certificates, export Excel, and <b>Schedule follow-up test</b> for 30–90 days later.</li></ol>` },
+  { id: "cycle", t: "The training cycle", roles: "admin trainer hod", b: `
+    <ol><li><b>Pre-training test</b> — what people know before.</li><li><b>Training</b>.</li>
+    <li><b>Post-training test</b> — same questions; shows the learning gain. Certificates go to those who pass.</li>
+    <li><b>Retrain</b> anyone below the pass mark.</li><li><b>Follow-up test</b> 30–90 days later — shows what people retained. It opens and closes by itself.</li>
+    <li><b>HOD review</b> every month in Departments; refreshers before certificates expire.</li></ol>` },
+  { id: "banks", t: "Question banks and AI", roles: "admin trainer", b: `
+    <p><b>Write new questions</b> makes questions from training material. <b>The file already has questions</b> copies an existing paper; where no answer key is given the explanation starts "Answer not in source — verify".</p>
+    <p>Everything from AI arrives as a <b>Draft</b>. Before approving check: the green ✔ answer matches the source page shown; only one option is right for single-answer questions; wrong options are clearly wrong; topic and difficulty are set.</p>
+    <p>Without AI: <b>Write a question</b>, or fill the <b>Excel template</b> (Answer column: B, or A,C for more than one) and upload it through Add from documents.</p>
+    <p>Limits: up to 60 questions per run; scanned PDFs — first 24 pages; files up to 40 MB. Old .doc/.ppt: save as .docx/.pptx first.</p>` },
+  { id: "participants", t: "Participant lists (bulk upload)", roles: "admin trainer", b: `
+    <p>In <b>New session</b> or <b>Session settings</b> press <b>Upload Excel / CSV</b>. The first sheet is read. Columns are found by their headings — <i>Emp ID</i> (or Employee No, Code, Token), <i>Name</i>, <i>Department</i> — in any order. Without headings, columns A, B, C are used.</p>
+    <p>People already in the box are kept; duplicates (same Emp ID) are skipped; rows without an Emp ID are skipped. <b>Download participant template</b> gives a ready file.</p>
+    <p>Department names must be spelt the same way as in the HOD's key (capitals don't matter), otherwise the HOD won't see those people.</p>` },
+  { id: "run", t: "Running a test in class", roles: "admin trainer", b: `
+    <p><b>Before:</b> session checked, projector ready, network checked, answer sheets printed for people without a phone.</p>
+    <p><b>During:</b> Open test → Show QR to class. The board shows joined and submitted counts. The Participants tab shows who is answering; "Left the page" 3 times or more is shown red.</p>
+    <p>A phone dies, or someone joined on the wrong phone → <b>Reset</b> on their row; they start again.</p>
+    <p><b>Close test</b> scores anyone who hasn't submitted with the answers saved so far.</p>` },
+  { id: "phone", t: "What participants do", roles: "admin trainer hod", b: `
+    <ol><li>Scan the QR code with the phone camera (or type the link).</li><li>Enter your own Employee ID; check your name.</li>
+    <li>Answer one question per screen; use Back, Next and All.</li><li>On the last screen dark numbers are answered — then <b>Submit answers</b>.</li>
+    <li>See your score and answers; download your result and certificate.</li></ol>
+    <p>If the network drops, keep the page open — answers are saved on the phone and sent automatically.</p>` },
+  { id: "paper", t: "Paper answer sheets", roles: "admin trainer", b: `
+    <p><b>Print paper test</b> on the session page: choose 1–4 <b>sets</b>. Each set has the same questions in a different order, with options shuffled, so neighbours can't copy. Print a ready pack (question paper + answer sheet per person, sets alternating) or one master per set to photocopy. <b>Print answer key</b> gives the key for every set. Hand out in printed order so neighbours get different sets.</p>
+    <p>After the test: <b>Paper entry</b> → tap each sheet's answers, or <b>Read answer sheets from photos</b> (photograph flat, good light; several at once). Rows the AI was unsure about are outlined — compare with the photo, correct, <b>Save and score</b>. The AI reads the SET letter printed on the sheet; when entering by hand, choose the set first.</p>
+    <p>Name and department are taken from the participant list when the Emp ID is on it.</p>` },
+  { id: "results", t: "Results, certificates and records", roles: "admin trainer", b: `
+    <p><b>Results</b> — ranked list, result cards, certificates. <b>Question analysis</b> — red "Re-teach or review" under 40% correct; amber "Check wording" when strong performers did no better than weak ones.</p>
+    <p><b>Print all certificates</b> — A4 landscape with a QR anyone can scan to check it. Validity is set per session (Schedule and certificates).</p>
+    <p><b>Export Excel</b> after closing each test and file it in the training records. Settings → <b>Download training register</b> lists every result ever recorded.</p>` },
+  { id: "effect", t: "Training effectiveness and follow-up", roles: "admin trainer hod", b: `
+    <p>On the post-test, <b>Training effectiveness</b> shows before → after per person and for the batch.</p>
+    <p><b>Learning gain</b> = (After − Before) ÷ (100 − Before). Below 0.3 low, 0.3–0.7 medium, above 0.7 high. Target: 0.3 or more.</p>
+    <p><b>Schedule follow-up test</b> → choose 30/60/90 days → <b>Share invitation</b> on WhatsApp. After it closes, <b>Retained</b> = Follow-up ÷ After. Target: 80% or more.</p>` },
+  { id: "hod", t: "Guide for HODs", roles: "admin trainer hod", b: `
+    <p>Sign in with your personal key. <b>Departments</b> shows only your department(s).</p>
+    <ul><li><b>Needs action</b>: Need retraining · Certificates expired or due in 30 days · Missed a test.</li>
+    <li><b>Trainings</b>: each test with taken/expected, passed and average.</li><li><b>Topic gaps</b>: weakest topics first — use them for the next training plan.</li>
+    <li><b>People → History</b>: every test a person took, with result card and certificate.</li></ul>
+    <p>Review monthly. <b>Download register</b> gives your department's results in Excel.</p>` },
+  { id: "orgdepts", t: "Departments and trainers (MR)", roles: "admin trainer", b: `
+    <p>The MR organises trainers by department in <b>Settings → Departments and trainers</b>:</p>
+    <ol><li><b>Add department</b> — name as written in participant lists, and the most trainers allowed (normally 5).</li>
+    <li><b>Trainers and HODs → Add person</b> — choose Trainer, tick the department(s); hand over the key.</li>
+    <li>Or press <b>Trainers</b> on a department row and tick up to the limit.</li></ol>
+    <p>A <b>department trainer</b> sees and runs only their department's tests and question banks (plus banks marked <i>Shared</i>), and their department's results. A trainer with no department is <b>plant-wide</b> and sees everything. Each test and bank shows its department; the Sessions page can be filtered by department.</p>
+    <p>"Tests run" in the people list shows how many tests each trainer has created.</p>` },
+  { id: "keys", t: "Keys and access", roles: "admin trainer hod", b: `
+    <p>Everyone uses the same sign-in page; the key decides what you see. Administrator: master key. Trainers and HODs: personal keys made in Settings → Trainers and HODs (shown once). Lost key → New key. Leaving staff → untick "Can sign in".</p>
+    <p>Never share a key or post it in a group.</p>` },
+  { id: "data", t: "Data storage and backup", roles: "admin trainer hod", b: `
+    <p>Results are kept with no expiry date until someone deletes them. The Free Netlify plan allows 5 GB per database — about two million test results. Settings → <b>Data and backup</b> shows the current size.</p>
+    <p>To keep records safe for years: (1) export each session to Excel after closing it; (2) the administrator downloads a <b>full backup</b> every month to the company drive; (3) download the <b>training register</b> at least yearly. Deleting a session deletes its results permanently.</p>
+    <p>On the Free plan, if the monthly usage credits run out the site pauses until the next month — data is kept. Check usage in Netlify → Team settings → Billing → Usage.</p>` },
+  { id: "verify", t: "Checking a certificate", roles: "admin trainer hod", b: `
+    <p>Scan the QR on the certificate, or open <b>${esc(location.origin)}/v/</b> followed by the certificate number. Green = valid · amber = expired · red = not found (do not accept).</p>` },
+  { id: "faq", t: "Problems and fixes", roles: "admin trainer hod", b: `
+    <table class="t"><thead><tr><th>Problem</th><th>Fix</th></tr></thead><tbody>
+    <tr><td>"Wrong key."</td><td>Retype without spaces; ask the administrator for a new key.</td></tr>
+    <tr><td>AI "Not set up" in Settings</td><td>GEMINI_API_KEY missing in Netlify → add it → Trigger deploy.</td></tr>
+    <tr><td>"AI took too long"</td><td>Ask for fewer questions (≤ 20) or split the document.</td></tr>
+    <tr><td>Phone: "already started on another phone"</td><td>Participants tab → Reset → start again.</td></tr>
+    <tr><td>Phone: "No network"</td><td>Keep the page open; answers send automatically.</td></tr>
+    <tr><td>HOD sees nobody</td><td>Department spelling differs — Settings → Edit HOD.</td></tr>
+    <tr><td>Print window doesn't open</td><td>Allow pop-ups for this site in the browser.</td></tr>
+    <tr><td>Photo read wrongly</td><td>Retake flat, in good light; correct outlined rows.</td></tr>
+    </tbody></table>` },
+];
+function viewHelp(focus) {
+  const items = HELP.filter((h) => h.roles.split(" ").includes(me.role));
+  app.innerHTML = `<div class="pagehead"><div><h1>Help</h1><p class="muted" style="margin:0">How to use the Training Assessment app. Click a topic to open it.</p></div>
+    <input type="search" id="hs" placeholder="Search help" style="max-width:280px"></div>
+    <div id="hl">${items.map((h) => `<details class="panel help" id="h-${h.id}" style="margin-bottom:.6rem" ${focus === h.id || (!focus && h === items[0]) ? "open" : ""}>
+      <summary style="cursor:pointer;font:700 1.15rem/1.3 var(--display)">${h.t}</summary><div class="hb" style="margin-top:.6rem">${h.b}</div></details>`).join("")}</div>
+    <p class="small muted">Full procedure: SOP — Training Assessment App (TEAS), kept by the Management Representative.</p>`;
+  app.querySelector("#hs").oninput = (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    app.querySelectorAll("details.help").forEach((d) => {
+      const hit = !q || d.textContent.toLowerCase().includes(q);
+      d.hidden = !hit; if (q && hit) d.open = true;
+    });
+  };
 }
 
 /* ================================================================ */
@@ -1384,9 +1820,11 @@ async function viewDept() {
   const deptLabel = d.depts.join(", ") || "—";
 
   app.innerHTML = `<div class="pagehead"><div><h1>Departments</h1><p class="muted" style="margin:0">Training results, gaps and due refreshers for <b>${esc(deptLabel)}</b>.</p></div>
+    <div class="row">${me.role === "hod" || me.scoped ? `<button class="btn" id="dreg">Download register</button>` : ""}
     ${d.available.length > 1 ? `<label class="row" style="gap:.5rem"><span class="small" style="font-weight:600">Department</span><select id="dsel" style="min-width:200px">
-      ${me.role === "hod" && d.available.length > 1 ? `<option value="">All my departments</option>` : ""}
-      ${d.available.map((x) => `<option ${d.depts.length === 1 && d.depts[0].toLowerCase() === x.toLowerCase() ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></label>` : ""}</div>
+      ${(me.role === "hod" || me.scoped) && d.available.length > 1 ? `<option value="">All my departments</option>` : ""}
+      ${d.available.map((x) => `<option ${d.depts.length === 1 && d.depts[0].toLowerCase() === x.toLowerCase() ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></label>` : ""}</div></div>
+  <div class="small" id="dregmsg"></div>
   ${!d.depts.length ? `<div class="panel muted">No department names found yet. They come from the Department column of participant lists and from what participants type when they join.</div>` : `
   <div class="stats">
     <div class="stat"><b>${people.size}</b><span>people tested</span></div>
@@ -1400,6 +1838,7 @@ async function viewDept() {
     .map(([k, l]) => `<button role="tab" data-dt="${k}" aria-selected="${deptState.tab === k}">${l}</button>`).join("")}</div>
   <div id="dbody"></div>`}`;
   app.querySelector("#dsel")?.addEventListener("change", (e) => { deptState.dept = e.target.value || null; viewDept(); });
+  app.querySelector("#dreg")?.addEventListener("click", () => downloadRegister(document.getElementById("dregmsg")));
   if (!d.depts.length) return;
   const draw = () => {
     const box = document.getElementById("dbody");

@@ -162,6 +162,34 @@ export function scoreAnswers(questions, answers, negative = 0) {
   return { score, max, percent, statuses };
 }
 
+/* ---------- printed paper sets: same questions, different order per set ---------- */
+// Must match paperLayout() in public/common.js exactly.
+export function paperLayout(session, set) {
+  const qs = session.questions;
+  const S = String(set || "A").toUpperCase();
+  if (S === "A") return qs.map((q, i) => ({ q: i, o: q.options.map((_, j) => j) }));
+  let h = 2166136261;
+  for (const c of `${session.code}|${S}`) h = Math.imul(h ^ c.charCodeAt(0), 16777619);
+  let a = h >>> 0;
+  const rnd = () => { a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const sh = (arr) => { arr = arr.slice(); for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; } return arr; };
+  const order = sh(qs.map((_, i) => i));
+  return order.map((qi) => ({ q: qi, o: qs[qi].qtype === "tf" ? qs[qi].options.map((_, j) => j) : sh(qs[qi].options.map((_, j) => j)) }));
+}
+/** answers keyed by printed row / printed option → keyed by master question / master option */
+function fromPrinted(session, set, printed) {
+  const layout = paperLayout(session, set);
+  const out = {};
+  for (const [k, v] of Object.entries(printed || {})) {
+    const row = layout[Number(k)];
+    if (!row || !Array.isArray(v)) continue;
+    const picks = v.map(Number).filter((p) => Number.isInteger(p) && p >= 0 && p < row.o.length).map((p) => row.o[p]);
+    if (picks.length) out[row.q] = picks;
+  }
+  return out;
+}
+const SETS = ["A", "B", "C", "D"];
+
 function sanitizeAnswers(raw, questions) {
   const out = {};
   if (!raw || typeof raw !== "object") return out;
@@ -593,24 +621,230 @@ const parseWhen = (v) => {
 const cleanDepts = (v) =>
   [...new Set((Array.isArray(v) ? v : String(v ?? "").split(/[,;\n]/)).map((d) => cleanText(d, 120)).filter(Boolean))].slice(0, 30);
 
+/** A trainer with departments only works inside them; one without departments is plant-wide. */
+const isScoped = (me) => me.role === "trainer" && (me.depts || []).length > 0;
+function canSee(me, row) {
+  if (!row || !isScoped(me)) return true;
+  return !row.dept || me.depts.some((d) => normDept(d) === normDept(row.dept)) || (row.created_by && row.created_by === me.id);
+}
+/** Map a typed department to its name in the master list, adding it if new. */
+async function deptName(sql, v) {
+  const n = cleanText(v, 120);
+  if (!n) return null;
+  const [d] = await sql`SELECT name FROM departments WHERE lower(name) = lower(${n})`;
+  if (d) return d.name;
+  await sql`INSERT INTO departments (name) VALUES (${n}) ON CONFLICT DO NOTHING`;
+  const [d2] = await sql`SELECT name FROM departments WHERE lower(name) = lower(${n})`;
+  return d2?.name ?? n;
+}
+async function deptList(sql, raw) {
+  const out = [];
+  for (const d of cleanDepts(raw)) {
+    const n = await deptName(sql, d);
+    if (n && !out.some((x) => normDept(x) === normDept(n))) out.push(n);
+  }
+  return out;
+}
+async function trainerLimitError(sql, depts, exceptId) {
+  for (const d of depts) {
+    const [dep] = await sql`SELECT name, max_trainers FROM departments WHERE lower(name) = lower(${d})`;
+    const max = dep?.max_trainers ?? 5;
+    const [c] = await sql`SELECT COUNT(*)::int AS n FROM app_users WHERE role = 'trainer' AND active = true AND id <> ${exceptId || 0}
+      AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(depts) x WHERE lower(trim(x)) = lower(${d}))`;
+    if (c.n + 1 > max) return `${dep?.name || d} already has ${c.n} trainer${c.n === 1 ? "" : "s"} — the limit is ${max}. Raise the limit in Departments and trainers, or remove someone first.`;
+  }
+  return null;
+}
+const NO_ACCESS = "This belongs to another department. Ask the MR if you need access.";
+
 async function trainerRoutes(req, seg, sql, me) {
   const m = req.method;
   const id = toInt(seg[2]);
+  const scoped = isScoped(me);
 
-  if (seg[1] === "login" && m === "POST") return json({ ok: true, role: me.role, name: me.name, depts: me.depts });
+  /* department-scoped trainers: check the item belongs to one of their departments */
+  if (scoped) {
+    if (seg[1] === "banks" && seg.length >= 3) {
+      const [b] = await sql`SELECT dept, created_by FROM banks WHERE id = ${id}`;
+      if (b && !canSee(me, b)) return fail(NO_ACCESS, 403);
+    }
+    if (seg[1] === "questions" && seg.length === 3 && seg[2] !== "bulk") {
+      const [b] = await sql`SELECT b.dept, b.created_by FROM questions q JOIN banks b ON b.id = q.bank_id WHERE q.id = ${id}`;
+      if (b && !canSee(me, b)) return fail(NO_ACCESS, 403);
+    }
+    if (seg[1] === "questions" && seg[2] === "bulk") {
+      let ids = [];
+      try { ids = ((await req.clone().json()).ids || []).map((x) => toInt(x)).filter(Boolean); } catch {}
+      const bs = ids.length ? await sql`SELECT DISTINCT b.dept, b.created_by FROM questions q JOIN banks b ON b.id = q.bank_id WHERE q.id = ANY(${ids}::int[])` : [];
+      if (bs.some((b) => !canSee(me, b))) return fail(NO_ACCESS, 403);
+    }
+    if (seg[1] === "sessions" && seg.length >= 3) {
+      const [x] = await sql`SELECT dept, created_by FROM sessions WHERE id = ${id}`;
+      if (x && !canSee(me, x)) return fail(NO_ACCESS, 403);
+    }
+    if (seg[1] === "attempts" && seg.length === 3) {
+      const [x] = await sql`SELECT s.dept, s.created_by FROM attempts a JOIN sessions s ON s.id = a.session_id WHERE a.id = ${id}`;
+      if (x && !canSee(me, x)) return fail(NO_ACCESS, 403);
+    }
+  }
+
+  /* ---------- departments and trainers (MR) ---------- */
+  if (seg[1] === "departments") {
+    if (seg.length === 2 && m === "GET") {
+      if (me.role !== "admin") {
+        const names = scoped ? me.depts : (await sql`SELECT name FROM departments WHERE active = true ORDER BY name`).map((d) => d.name);
+        return json({ names, scoped, plantWide: !scoped });
+      }
+      const deps = await sql`SELECT * FROM departments ORDER BY active DESC, name`;
+      const users = await sql`SELECT id, name, role, depts, active FROM app_users ORDER BY name`;
+      const stats = await sql`SELECT lower(trim(dept)) AS k, COUNT(*)::int AS sessions, MAX(COALESCE(training_date::timestamptz, created_at)) AS last
+                              FROM sessions WHERE dept IS NOT NULL GROUP BY 1`;
+      const results = await sql`SELECT lower(trim(dept)) AS k, COUNT(*)::int AS n FROM attempts WHERE submitted_at IS NOT NULL AND dept IS NOT NULL GROUP BY 1`;
+      const has = (u, d) => (u.depts || []).some((x) => normDept(x) === normDept(d));
+      return json({
+        departments: deps.map((d) => {
+          const st = stats.find((x) => x.k === normDept(d.name));
+          return { ...d, trainers: users.filter((u) => u.role === "trainer" && has(u, d.name)).map(({ id, name, active }) => ({ id, name, active })),
+            hods: users.filter((u) => u.role === "hod" && has(u, d.name)).map(({ id, name, active }) => ({ id, name, active })),
+            sessions: st?.sessions || 0, lastSession: st?.last || null, results: results.find((x) => x.k === normDept(d.name))?.n || 0 };
+        }),
+        trainers: users.filter((u) => u.role === "trainer"),
+      });
+    }
+    if (me.role !== "admin") return fail("Only the MR (administrator) can organise departments.", 403);
+    if (seg.length === 2 && m === "POST") {
+      const b = await readBody(req);
+      const name = cleanText(b.name, 120);
+      if (!name) return fail("Enter the department name.");
+      const [ex] = await sql`SELECT id FROM departments WHERE lower(name) = lower(${name})`;
+      if (ex) return fail(`"${name}" is already in the list.`);
+      const [row] = await sql`INSERT INTO departments (name, max_trainers) VALUES (${name}, ${Math.min(Math.max(toInt(b.maxTrainers, 5), 1), 20)}) RETURNING *`;
+      return json(row, 201);
+    }
+    const [dep] = await sql`SELECT * FROM departments WHERE id = ${id}`;
+    if (!dep) return fail("Department not found", 404);
+    if (seg.length === 3 && m === "PUT") {
+      const b = await readBody(req);
+      const max = Math.min(Math.max(toInt(b.maxTrainers ?? dep.max_trainers, 5), 1), 20);
+      const [row] = await sql`UPDATE departments SET max_trainers = ${max}, active = ${b.active ?? dep.active} WHERE id = ${id} RETURNING *`;
+      return json(row);
+    }
+    if (seg[3] === "trainers" && m === "PUT") {
+      const b = await readBody(req);
+      const want = new Set((b.userIds || []).map((x) => toInt(x)).filter(Boolean));
+      if (want.size > dep.max_trainers) return fail(`${dep.name} allows ${dep.max_trainers} trainers. You picked ${want.size}.`);
+      const trainers = await sql`SELECT id, depts FROM app_users WHERE role = 'trainer'`;
+      for (const t of trainers) {
+        const cur = (t.depts || []).filter((x) => normDept(x) !== normDept(dep.name));
+        const next = want.has(t.id) ? [...cur, dep.name] : cur;
+        if (next.length !== (t.depts || []).length || want.has(t.id) !== (t.depts || []).some((x) => normDept(x) === normDept(dep.name)))
+          await sql`UPDATE app_users SET depts = ${J(next)}::jsonb WHERE id = ${t.id}`;
+      }
+      return json({ ok: true, count: want.size });
+    }
+    if (seg.length === 3 && m === "DELETE") {
+      const [u] = await sql`SELECT COUNT(*)::int AS n FROM app_users WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(depts) x WHERE lower(trim(x)) = lower(${dep.name}))`;
+      if (u.n) return fail(`Remove the ${u.n} trainer(s)/HOD(s) from ${dep.name} first. Past results keep their department name.`);
+      await sql`DELETE FROM departments WHERE id = ${id}`;
+      return json({ ok: true });
+    }
+  }
+
+  if (seg[1] === "login" && m === "POST") return json({ ok: true, role: me.role, name: me.name, depts: me.depts, id: me.id ?? null, scoped });
+
+  /* ---------- data: storage, backup, restore, register ---------- */
+  if (seg[1] === "storage" && m === "GET") {
+    const [c] = await sql`SELECT (SELECT COUNT(*) FROM banks)::int AS banks, (SELECT COUNT(*) FROM questions)::int AS questions,
+      (SELECT COUNT(*) FROM sessions)::int AS sessions, (SELECT COUNT(*) FROM attempts)::int AS attempts,
+      (SELECT COUNT(*) FROM attempts WHERE cert_code IS NOT NULL)::int AS certificates,
+      (SELECT MIN(created_at) FROM sessions) AS first_session`;
+    let bytes = null;
+    try { [{ bytes }] = await sql`SELECT pg_database_size(current_database())::bigint AS bytes`; } catch {}
+    return json({ ...c, bytes: bytes === null ? null : Number(bytes) });
+  }
+
+  if (seg[1] === "backup" && seg.length === 3 && m === "GET") {
+    if (me.role !== "admin") return fail("Only the administrator can download a full backup.", 403);
+    const q = new URL(req.url).searchParams;
+    const after = toInt(q.get("after")), limit = Math.min(Math.max(toInt(q.get("limit") ?? 1000, 1000), 1), 3000);
+    let rows;
+    if (seg[2] === "banks") rows = await sql`SELECT * FROM banks WHERE id > ${after} ORDER BY id LIMIT ${limit}`;
+    else if (seg[2] === "questions") rows = await sql`SELECT * FROM questions WHERE id > ${after} ORDER BY id LIMIT ${limit}`;
+    else if (seg[2] === "sessions") rows = await sql`SELECT * FROM sessions WHERE id > ${after} ORDER BY id LIMIT ${Math.min(limit, 200)}`;
+    else if (seg[2] === "attempts") rows = await sql`SELECT id, session_id, emp_id, name, dept, layout, answers, tab_switches, mode, started_at, submitted_at,
+        score, max_score, percent, passed, cert_code, scan_flags, paper_set FROM attempts WHERE id > ${after} ORDER BY id LIMIT ${limit}`;
+    else if (seg[2] === "app_users") rows = await sql`SELECT * FROM app_users WHERE id > ${after} ORDER BY id LIMIT ${limit}`;
+    else if (seg[2] === "departments") rows = await sql`SELECT * FROM departments WHERE id > ${after} ORDER BY id LIMIT ${limit}`;
+    else return fail("Unknown table");
+    return json({ rows, more: rows.length > 0 && rows.length >= (seg[2] === "sessions" ? Math.min(limit, 200) : limit) });
+  }
+
+  if (seg[1] === "restore") {
+    if (me.role !== "admin") return fail("Only the administrator can restore a backup.", 403);
+    if (seg[2] === "check" && m === "POST") {
+      const [c] = await sql`SELECT (SELECT COUNT(*) FROM banks)::int + (SELECT COUNT(*) FROM sessions)::int + (SELECT COUNT(*) FROM app_users)::int AS n`;
+      return json({ empty: c.n === 0 });
+    }
+    if (seg[2] === "finish" && m === "POST") {
+      await sql`SELECT setval('banks_id_seq', COALESCE((SELECT MAX(id) FROM banks), 1))`;
+      await sql`SELECT setval('questions_id_seq', COALESCE((SELECT MAX(id) FROM questions), 1))`;
+      await sql`SELECT setval('sessions_id_seq', COALESCE((SELECT MAX(id) FROM sessions), 1))`;
+      await sql`SELECT setval('attempts_id_seq', COALESCE((SELECT MAX(id) FROM attempts), 1))`;
+      await sql`SELECT setval('app_users_id_seq', COALESCE((SELECT MAX(id) FROM app_users), 1))`;
+      await sql`SELECT setval('departments_id_seq', COALESCE((SELECT MAX(id) FROM departments), 1))`;
+      return json({ ok: true });
+    }
+    if (seg.length === 3 && m === "POST") {
+      const b = await readBody(req);
+      const rows = Array.isArray(b.rows) ? b.rows.slice(0, 3000) : [];
+      if (!rows.length) return json({ inserted: 0 });
+      const t = seg[2];
+      if (t === "banks") await sql`INSERT INTO banks SELECT * FROM jsonb_populate_recordset(null::banks, ${J(rows)}::jsonb) ON CONFLICT (id) DO NOTHING`;
+      else if (t === "questions") await sql`INSERT INTO questions SELECT * FROM jsonb_populate_recordset(null::questions, ${J(rows)}::jsonb) ON CONFLICT (id) DO NOTHING`;
+      else if (t === "sessions") await sql`INSERT INTO sessions SELECT * FROM jsonb_populate_recordset(null::sessions, ${J(rows)}::jsonb) ON CONFLICT DO NOTHING`;
+      else if (t === "attempts") {
+        const withToken = rows.map((r) => ({ ...r, token: r.token || crypto.randomUUID() }));
+        await sql`INSERT INTO attempts SELECT * FROM jsonb_populate_recordset(null::attempts, ${J(withToken)}::jsonb) ON CONFLICT DO NOTHING`;
+      } else if (t === "app_users") await sql`INSERT INTO app_users SELECT * FROM jsonb_populate_recordset(null::app_users, ${J(rows)}::jsonb) ON CONFLICT DO NOTHING`;
+      else if (t === "departments") await sql`INSERT INTO departments SELECT * FROM jsonb_populate_recordset(null::departments, ${J(rows)}::jsonb) ON CONFLICT DO NOTHING`;
+      else return fail("Unknown table");
+      return json({ inserted: rows.length });
+    }
+  }
+
+  // GET /api/admin/register — every submitted result, for the training register (HODs: own departments only)
+  if (seg[1] === "register" && m === "GET") {
+    const q = new URL(req.url).searchParams;
+    const after = toInt(q.get("after")), limit = 4000;
+    const keys = me.role === "hod" || scoped ? me.depts.map(normDept) : null;
+    const rows = keys
+      ? await sql`SELECT a.id, a.emp_id, a.name, a.dept, a.mode, a.percent, a.passed, a.submitted_at, a.cert_code,
+            s.id AS session_id, s.title, s.stype, s.code, s.trainer, s.venue, s.training_date, s.pass_mark, s.cert_valid_months
+          FROM attempts a JOIN sessions s ON s.id = a.session_id
+          WHERE a.submitted_at IS NOT NULL AND a.id > ${after} AND lower(trim(a.dept)) = ANY(${keys}::text[]) ORDER BY a.id LIMIT ${limit}`
+      : await sql`SELECT a.id, a.emp_id, a.name, a.dept, a.mode, a.percent, a.passed, a.submitted_at, a.cert_code,
+            s.id AS session_id, s.title, s.stype, s.code, s.trainer, s.venue, s.training_date, s.pass_mark, s.cert_valid_months
+          FROM attempts a JOIN sessions s ON s.id = a.session_id
+          WHERE a.submitted_at IS NOT NULL AND a.id > ${after} ORDER BY a.id LIMIT ${limit}`;
+    return json({ rows: rows.map((r) => ({ ...r, percent: Number(r.percent) })), more: rows.length >= limit });
+  }
 
   /* ---------- users (administrator only) ---------- */
   if (seg[1] === "users") {
     if (seg.length === 2 && m === "GET") {
-      return json(await sql`SELECT id, name, role, depts, key_hint, active, last_login_at, created_at FROM app_users ORDER BY role, name`);
+      return json(await sql`SELECT u.id, u.name, u.role, u.depts, u.key_hint, u.active, u.last_login_at, u.created_at,
+        (SELECT COUNT(*)::int FROM sessions s WHERE s.created_by = u.id) AS sessions_run,
+        (SELECT MAX(s.created_at) FROM sessions s WHERE s.created_by = u.id) AS last_session
+        FROM app_users u ORDER BY u.role, u.name`);
     }
     if (seg.length === 2 && m === "POST") {
       const b = await readBody(req);
       const name = cleanText(b.name, 120);
       const role = b.role === "hod" ? "hod" : "trainer";
-      const depts = cleanDepts(b.depts);
+      const depts = await deptList(sql, b.depts);
       if (!name) return fail("Enter the person's name.");
       if (role === "hod" && !depts.length) return fail("Enter at least one department for the HOD.");
+      if (role === "trainer") { const err = await trainerLimitError(sql, depts, 0); if (err) return fail(err); }
       const key = newKey(role === "hod" ? "H" : "T");
       const [row] = await sql`INSERT INTO app_users (name, role, depts, key_hash, key_hint)
         VALUES (${name}, ${role}, ${J(depts)}::jsonb, ${sha256(key)}, ${key.slice(-4)})
@@ -622,8 +856,9 @@ async function trainerRoutes(req, seg, sql, me) {
       const [u] = await sql`SELECT * FROM app_users WHERE id = ${id}`;
       if (!u) return fail("User not found", 404);
       const role = b.role ? (b.role === "hod" ? "hod" : "trainer") : u.role;
-      const depts = b.depts !== undefined ? cleanDepts(b.depts) : u.depts;
+      const depts = b.depts !== undefined ? await deptList(sql, b.depts) : u.depts;
       if (role === "hod" && !depts.length) return fail("Enter at least one department for the HOD.");
+      if (role === "trainer" && (b.active ?? u.active)) { const err = await trainerLimitError(sql, depts, id); if (err) return fail(err); }
       const [row] = await sql`UPDATE app_users SET name = ${cleanText(b.name ?? u.name, 120)}, role = ${role},
         depts = ${J(depts)}::jsonb, active = ${b.active ?? u.active}
         WHERE id = ${id} RETURNING id, name, role, depts, key_hint, active, last_login_at, created_at`;
@@ -650,10 +885,12 @@ async function trainerRoutes(req, seg, sql, me) {
                                  WHERE coalesce(trim(r->>'dept'), '') <> ''`;
     const seen = new Map();
     for (const { d } of [...fromAttempts, ...fromRoster]) if (!seen.has(normDept(d))) seen.set(normDept(d), d);
-    const available = me.role === "hod" ? me.depts : [...seen.values()].sort((a, b) => a.localeCompare(b));
+    const limited = me.role === "hod" || scoped;
+    for (const { name } of await sql`SELECT name FROM departments WHERE active = true`) if (!seen.has(normDept(name))) seen.set(normDept(name), name);
+    const available = limited ? me.depts : [...seen.values()].sort((a, b) => a.localeCompare(b));
     const want = new URL(req.url).searchParams.get("dept");
-    let depts = me.role === "hod" ? me.depts : [];
-    if (want && (me.role !== "hod" || me.depts.some((d) => normDept(d) === normDept(want)))) depts = [want];
+    let depts = limited ? me.depts : [];
+    if (want && (!limited || me.depts.some((d) => normDept(d) === normDept(want)))) depts = [want];
     const keys = depts.map(normDept);
     if (!keys.length) return json({ available, depts, sessions: [], attempts: [], topics: [] });
 
@@ -692,7 +929,7 @@ async function trainerRoutes(req, seg, sql, me) {
   if (seg[1] === "hod" && seg[2] === "card" && seg.length === 4 && m === "GET") {
     const [a] = await sql`SELECT * FROM attempts WHERE id = ${toInt(seg[3])} AND submitted_at IS NOT NULL`;
     if (!a) return fail("Result not found.", 404);
-    if (me.role === "hod" && !me.depts.some((d) => normDept(d) === normDept(a.dept))) return fail("This person is not in your department.", 403);
+    if ((me.role === "hod" || scoped) && !me.depts.some((d) => normDept(d) === normDept(a.dept))) return fail("This person is not in your department.", 403);
     const [s] = await sql`SELECT * FROM sessions WHERE id = ${a.session_id}`;
     return json({ result: buildResult({ ...s, show_answers: true }, a) });
   }
@@ -710,21 +947,26 @@ async function trainerRoutes(req, seg, sql, me) {
                COUNT(q.id) FILTER (WHERE q.status = 'approved')::int AS approved
         FROM banks b LEFT JOIN questions q ON q.bank_id = b.id
         GROUP BY b.id ORDER BY b.created_at DESC`;
-      return json(rows);
+      return json(rows.filter((r) => canSee(me, r)));
     }
     if (m === "POST") {
       const b = await readBody(req);
       const name = cleanText(b.name, 120);
       if (!name) return fail("Give the question bank a name.");
-      const [row] = await sql`INSERT INTO banks (name, topic) VALUES (${name}, ${cleanText(b.topic, 120) || null}) RETURNING *`;
+      const dept = await deptName(sql, b.dept);
+      if (scoped && dept && !canSee(me, { dept })) return fail(NO_ACCESS, 403);
+      const [row] = await sql`INSERT INTO banks (name, topic, dept, created_by) VALUES (${name}, ${cleanText(b.topic, 120) || null}, ${dept}, ${me.id ?? null}) RETURNING *`;
       return json(row, 201);
     }
   }
   if (seg[1] === "banks" && seg.length === 3) {
     if (m === "PUT") {
       const b = await readBody(req);
-      const [row] = await sql`UPDATE banks SET name = ${cleanText(b.name, 120)}, topic = ${cleanText(b.topic, 120) || null}
-                              WHERE id = ${id} RETURNING *`;
+      const dept = "dept" in b ? await deptName(sql, b.dept) : undefined;
+      if (scoped && dept && !canSee(me, { dept })) return fail(NO_ACCESS, 403);
+      const [row] = dept === undefined
+        ? await sql`UPDATE banks SET name = ${cleanText(b.name, 120)}, topic = ${cleanText(b.topic, 120) || null} WHERE id = ${id} RETURNING *`
+        : await sql`UPDATE banks SET name = ${cleanText(b.name, 120)}, topic = ${cleanText(b.topic, 120) || null}, dept = ${dept} WHERE id = ${id} RETURNING *`;
       return row ? json(row) : fail("Bank not found", 404);
     }
     if (m === "DELETE") {
@@ -831,14 +1073,15 @@ async function trainerRoutes(req, seg, sql, me) {
       await syncDue(sql);
       const rows = await sql`
         SELECT s.id, s.code, s.title, s.trainer, s.venue, s.training_date, s.stype, s.status, s.pass_mark,
-               s.time_limit_min, s.pre_session_id, s.source_session_id, s.open_at, s.close_at, s.created_at, jsonb_array_length(s.questions) AS question_count,
+               s.time_limit_min, s.pre_session_id, s.source_session_id, s.open_at, s.close_at, s.created_at, s.dept, s.created_by,
+               (SELECT name FROM app_users u WHERE u.id = s.created_by) AS created_by_name, jsonb_array_length(s.questions) AS question_count,
                jsonb_array_length(s.roster) AS roster_count,
                COUNT(a.id)::int AS joined,
                COUNT(a.id) FILTER (WHERE a.submitted_at IS NOT NULL)::int AS submitted,
                ROUND(AVG(a.percent) FILTER (WHERE a.submitted_at IS NOT NULL), 1) AS avg_percent
         FROM sessions s LEFT JOIN attempts a ON a.session_id = s.id
         GROUP BY s.id ORDER BY s.created_at DESC`;
-      return json(rows);
+      return json(rows.filter((r) => canSee(me, r)));
     }
     if (m === "POST") {
       const b = await readBody(req);
@@ -859,9 +1102,13 @@ async function trainerRoutes(req, seg, sql, me) {
           };
         });
       if (copyId) {
-        const [src] = await sql`SELECT questions FROM sessions WHERE id = ${copyId}`;
+        const [src] = await sql`SELECT questions, dept, created_by FROM sessions WHERE id = ${copyId}`;
+        if (src && !canSee(me, src)) return fail(NO_ACCESS, 403);
         if (src) snapshot = src.questions;
       }
+      const dept = await deptName(sql, b.dept);
+      if (scoped && !dept) return fail("Choose your department for this test.");
+      if (scoped && !canSee(me, { dept })) return fail(NO_ACCESS, 403);
       if (!snapshot.length) return fail("None of the picked questions are approved yet.");
       const openAt = parseWhen(b.openAt), closeAt = parseWhen(b.closeAt);
       if (openAt && closeAt && closeAt <= openAt) return fail("The closing time must be after the opening time.");
@@ -875,14 +1122,14 @@ async function trainerRoutes(req, seg, sql, me) {
           const [row] = await sql`
             INSERT INTO sessions (code, title, trainer, venue, training_date, stype, pre_session_id, time_limit_min,
               pass_mark, shuffle, show_answers, negative_mark, questions, roster,
-              source_session_id, open_at, close_at, issue_certificates, cert_valid_months)
+              source_session_id, open_at, close_at, issue_certificates, cert_valid_months, dept, created_by)
             VALUES (${newCode()}, ${title}, ${cleanText(b.trainer, 120) || null}, ${cleanText(b.venue, 120) || null},
               ${b.trainingDate || null}, ${stype}, ${toInt(b.preSessionId) || null},
               ${Math.min(Math.max(toInt(b.timeLimitMin), 0), 600)}, ${Math.min(Math.max(toInt(b.passMark, 60), 0), 100)},
               ${b.shuffle !== false}, ${b.showAnswers !== false}, ${Math.min(Math.max(Number(b.negativeMark) || 0, 0), 1)},
               ${J(snapshot)}::jsonb, ${J(roster)}::jsonb,
               ${toInt(b.sourceSessionId) || null}, ${openAt}, ${closeAt}, ${b.issueCertificates !== false},
-              ${Math.min(Math.max(toInt(b.certValidMonths), 0), 120)})
+              ${Math.min(Math.max(toInt(b.certValidMonths), 0), 120)}, ${dept}, ${me.id ?? null})
             RETURNING *`;
           return json(row, 201);
         } catch (e) {
@@ -900,14 +1147,17 @@ async function trainerRoutes(req, seg, sql, me) {
     if (seg.length === 3 && m === "GET") {
       s = await syncStatus(sql, s);
       const attempts = await sql`SELECT id, emp_id, name, dept, mode, answers, tab_switches, started_at, submitted_at,
-                                        score, max_score, percent, passed, cert_code, scan_flags
+                                        score, max_score, percent, passed, cert_code, scan_flags, paper_set
                                  FROM attempts WHERE session_id = ${id} ORDER BY started_at`;
       const chain = await chainOf(sql, s);
-      return json({ session: s, attempts, chain, serverNow: new Date().toISOString() });
+      const [cb] = s.created_by ? await sql`SELECT name FROM app_users WHERE id = ${s.created_by}` : [];
+      return json({ session: { ...s, created_by_name: cb?.name ?? null }, attempts, chain, serverNow: new Date().toISOString() });
     }
 
     if (seg.length === 3 && m === "PUT") {
       const b = await readBody(req);
+      const newDept = "dept" in b ? await deptName(sql, b.dept) : s.dept;
+      if (scoped && (!newDept || !canSee(me, { dept: newDept }))) return fail("Choose one of your departments.", 403);
       const roster = Array.isArray(b.roster)
         ? b.roster
             .map((r) => ({ empId: cleanEmp(r.empId), name: cleanText(r.name, 120), dept: cleanText(r.dept, 120) }))
@@ -923,7 +1173,8 @@ async function trainerRoutes(req, seg, sql, me) {
           open_at = ${"openAt" in b ? parseWhen(b.openAt) : s.open_at},
           close_at = ${"closeAt" in b ? parseWhen(b.closeAt) : s.close_at},
           issue_certificates = ${b.issueCertificates ?? s.issue_certificates},
-          cert_valid_months = ${Math.min(Math.max(toInt(b.certValidMonths ?? s.cert_valid_months), 0), 120)}
+          cert_valid_months = ${Math.min(Math.max(toInt(b.certValidMonths ?? s.cert_valid_months), 0), 120)},
+          dept = ${newDept}
         WHERE id = ${id} RETURNING *`;
       return json(row);
     }
@@ -958,16 +1209,18 @@ async function trainerRoutes(req, seg, sql, me) {
       const name = cleanText(b.name, 120) || rosterHit?.name;
       if (!name) return fail("Enter the name from the answer sheet.");
       const dept = cleanText(b.dept, 120) || rosterHit?.dept || null;
-      const answers = sanitizeAnswers(b.answers, s.questions);
+      const set = SETS.includes(String(b.set || "").toUpperCase()) ? String(b.set).toUpperCase() : "A";
+      const answers = sanitizeAnswers(fromPrinted(s, set, b.answers), s.questions);
       const [existing] = await sql`SELECT * FROM attempts WHERE session_id = ${id} AND emp_id = ${empId}`;
       if (existing && !b.overwrite)
         return fail(`${empId} already has a ${existing.mode} entry in this session. Tick "Replace existing" to overwrite.`, 409);
       if (existing) await sql`DELETE FROM attempts WHERE id = ${existing.id}`;
-      const layout = s.questions.map((q, i) => ({ q: i, o: q.options.map((_, j) => j) }));
-      const flags = Array.isArray(b.scanFlags) ? b.scanFlags.map(Number).filter((x) => Number.isInteger(x) && x >= 0 && x < s.questions.length) : null;
+      const layout = paperLayout(s, set);
+      const flags = Array.isArray(b.scanFlags)
+        ? b.scanFlags.map(Number).filter((x) => Number.isInteger(x) && x >= 0 && x < s.questions.length).map((x) => layout[x].q) : null;
       const [a] = await sql`
-        INSERT INTO attempts (session_id, emp_id, name, dept, token, layout, mode, scan_flags)
-        VALUES (${id}, ${empId}, ${name}, ${dept}, ${crypto.randomUUID()}, ${J(layout)}::jsonb, 'paper', ${flags ? J(flags) : null}::jsonb) RETURNING *`;
+        INSERT INTO attempts (session_id, emp_id, name, dept, token, layout, mode, scan_flags, paper_set)
+        VALUES (${id}, ${empId}, ${name}, ${dept}, ${crypto.randomUUID()}, ${J(layout)}::jsonb, 'paper', ${flags ? J(flags) : null}::jsonb, ${set}) RETURNING *`;
       const done = await finalize(sql, s, a, answers);
       return json({ ok: true, result: buildResult({ ...s, show_answers: true }, done) }, 201);
     }
@@ -977,20 +1230,20 @@ async function trainerRoutes(req, seg, sql, me) {
       const b = await readBody(req);
       const img = b.image;
       if (!img || !/^image\/(png|jpe?g|webp)$/.test(img.mime) || typeof img.data !== "string") return fail("Send a photo of the answer sheet.");
-      const rows = s.questions
-        .map((q, i) => `${i + 1}: options ${LETTERS.slice(0, q.options.length).split("").join(" ")} — ${q.qtype === "multi" ? "one or more marks allowed" : "exactly one mark expected"}`)
-        .join("\n");
+      const maxOpt = Math.max(...s.questions.map((q) => q.options.length));
+      const rows = `Rows 1 to ${s.questions.length}, each with up to ${maxOpt} bubbles (${LETTERS.slice(0, maxOpt).split("").join(" ")}). Rows printed with "more than one" may have several marks; all other rows expect exactly one mark.`;
       const system = `You read photographed paper answer sheets for a multiple-choice test at an Indian cement plant.
 Return ONLY a JSON object, no prose, no code fences:
-{"empId":"","name":"","dept":"","answers":{"1":["B"],"2":["A","C"]},"unclear":[3,7]}
+{"set":"A","empId":"","name":"","dept":"","answers":{"1":["B"],"2":["A","C"]},"unclear":[3,7]}
 Rules:
 - Rows are numbered; each row has lettered bubbles. A bubble counts as marked if it is filled, shaded, ticked, crossed or circled.
 - If one mark is struck through or scribbled out and another mark exists in the row, use the remaining mark.
 - Leave a row out of "answers" (or use []) if nothing is marked.
 - Put a row number in "unclear" if the marks are faint, ambiguous, or a single-answer row has more than one mark. Still give your best reading in "answers".
 - Read the handwritten Emp ID, Name and Department exactly as written; use "" if unreadable. Emp ID is usually letters and digits.
+- "set" is the paper set printed large at the top of the sheet ("SET A", "SET B", "SET C" or "SET D"). Use "" if no set is printed.
 - Never guess answers from the content of the questions — read only the marks.`;
-      const user = `The sheet has ${s.questions.length} rows:\n${rows}\nRead this answer sheet.`;
+      const user = `${rows}\nRead this answer sheet.`;
       let raw;
       try {
         raw = await callAI({ system, user, images: [{ mime: img.mime, data: img.data }] });
@@ -1006,17 +1259,27 @@ Rules:
           .map((x) => x.charCodeAt(0) - 65);
         if (i >= 0 && picks.length) answers[i] = picks;
       }
-      const clean = sanitizeAnswers(answers, s.questions);
+      const setRead = String(raw?.set || "").toUpperCase().replace(/[^A-D]/g, "").slice(0, 1);
+      const set = setRead || "A";
+      // keep answers in PRINTED numbering for the trainer's check; trim to each printed row's real option count
+      const layout = paperLayout(s, set);
+      const clean = {};
       const unclear = new Set((Array.isArray(raw?.unclear) ? raw.unclear : []).map((x) => toInt(x) - 1).filter((x) => x >= 0 && x < s.questions.length));
-      Object.keys(answers).forEach((k) => {
-        if (s.questions[k] && s.questions[k].qtype !== "multi" && answers[k].length > 1) unclear.add(Number(k));
-      });
+      for (const [k, v] of Object.entries(answers)) {
+        const row = layout[Number(k)];
+        if (!row) continue;
+        const q = s.questions[row.q];
+        let picks = [...new Set(v.filter((p) => p < q.options.length))];
+        if (q.qtype !== "multi" && picks.length > 1) { unclear.add(Number(k)); picks = picks.slice(0, 1); }
+        if (picks.length) clean[k] = picks;
+      }
       const empId = cleanEmp(raw?.empId);
       const hit = s.roster.find((r) => cleanEmp(r.empId) === empId);
       const [existing] = empId ? await sql`SELECT mode FROM attempts WHERE session_id = ${id} AND emp_id = ${empId}` : [];
       // the participant list is more reliable than handwriting
       return json({ empId, name: hit?.name || cleanText(raw?.name, 120), dept: hit?.dept || cleanText(raw?.dept, 120),
-        inRoster: Boolean(hit), answers: clean, unclear: [...unclear].sort((a, b) => a - b), existing: existing?.mode ?? null });
+        inRoster: Boolean(hit), answers: clean, unclear: [...unclear].sort((a, b) => a - b), existing: existing?.mode ?? null,
+        set, setRead: Boolean(setRead) });
     }
 
     // GET /api/admin/sessions/:id/attempts/:aid — full result card
@@ -1046,7 +1309,7 @@ export default async (req) => {
     if (seg[0] === "admin") {
       const me = await whoAmI(req, sql);
       if (!me) return env("TRAINER_KEY") ? fail("Wrong key.", 401) : fail("TRAINER_KEY is not set on the server.", 500);
-      if (me.role === "hod" && !["login", "hod"].includes(seg[1])) return fail("Your key only opens the department view.", 403);
+      if (me.role === "hod" && !["login", "hod", "register"].includes(seg[1])) return fail("Your key only opens the department view.", 403);
       if (seg[1] === "users" && me.role !== "admin") return fail("Only the administrator can manage users.", 403);
       return (await trainerRoutes(req, seg, sql, me)) ?? fail("Not found", 404);
     }
